@@ -1,1 +1,1 @@
-# AI-infra-camp
+# AI-infra-playground
