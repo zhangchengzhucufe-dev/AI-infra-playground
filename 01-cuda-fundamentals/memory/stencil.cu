@@ -1,24 +1,26 @@
-// 问题 4.2：三点平均 stencil（填空）。
-// out[i] = (in[i-1] + in[i] + in[i+1]) / 3，越界位置按 0 处理。
-// 写两个 kernel：一个用静态 shared memory，一个用动态的。
-// 填完之前这个文件无法通过编译。
-// 注：设置block内共享tile数组是为了减少对global memory的访问次数——
-//    每个元素只从显存读一次，块内的三次复用都走片上的 shared memory
-//    （延迟远低于显存）。
+// Three-point averaging stencil: out[i] = (in[i-1] + in[i] + in[i+1]) / 3,
+// positions past either edge read as 0. Two kernels, identical math: one with
+// a statically declared shared tile, one with a dynamically sized extern
+// __shared__ tile whose byte size is passed at launch. The shared tile exists
+// to cut global-memory traffic: each element is read from VRAM once, and the
+// block's threefold reuse then hits on-chip shared memory, whose latency is
+// far below VRAM's.
+// main() checks both versions against a CPU reference; expected output
+// "static PASS", "dynamic PASS", PASS.
 #include "common.h"
 
 #define BLOCK 256
 #define RADIUS 1
 
 __global__ void stencil_static(const float *in, float *out, int n) {
-    // ====== 空 1：静态 shared 数组，要装下 BLOCK 个元素加两侧 halo ======
+    // Static shared tile: BLOCK elements plus a halo of RADIUS on each side.
     __shared__ float tile[BLOCK + 2 * RADIUS];
 
-    int g = blockIdx.x * blockDim.x + threadIdx.x;  // 全局下标
-    int l = threadIdx.x + RADIUS;                   // 在 tile 里的位置
+    int g = blockIdx.x * blockDim.x + threadIdx.x;  // global index
+    int l = threadIdx.x + RADIUS;                   // position inside the tile
 
     tile[l] = (g < n) ? in[g] : 0.f;
-    // 块两端的线程多搬一个 halo 元素。
+    // Threads at the block edges also fetch one halo element per side.
     if (threadIdx.x < RADIUS) {
         int left = g - RADIUS;
         int right = g + BLOCK;
@@ -26,17 +28,17 @@ __global__ void stencil_static(const float *in, float *out, int n) {
         tile[l + BLOCK] = (right < n) ? in[right] : 0.f;
     }
 
-    // ====== 空 2：在这里补上一行 ======
+    // Barrier: the tile must be fully populated before anyone reads it.
     __syncthreads();
 
     if (g < n) {
-        // ====== 空 3：用 tile（不许用 in）算三点平均 ======
+        // Three-point average, read from the tile (never from global in[]).
         out[g] = (tile[l - 1] + tile[l] + tile[l + 1]) / 3.f;
     }
 }
 
 __global__ void stencil_dynamic(const float *in, float *out, int n) {
-    // ====== 空 4：动态 shared 数组的声明方式（大小在 launch 时才给出） ======
+    // Dynamic shared memory: declared extern, sized at launch time.
     extern __shared__ float tile[];
 
     int g = blockIdx.x * blockDim.x + threadIdx.x;
@@ -83,7 +85,7 @@ int main() {
     printf("static  PASS\n");
 
     CUDA_CHECK(cudaMemset(d_out, 0, bytes));
-    // ====== 空 5：动态 shared 版本的 launch——第三个参数该填多少字节？ ======
+    // Dynamic launch: the third config argument is the tile size in bytes.
     stencil_dynamic<<<blocks, BLOCK, (BLOCK + 2 * RADIUS) * sizeof(float)>>>(
         d_in, d_out, n);
     CUDA_CHECK_KERNEL();

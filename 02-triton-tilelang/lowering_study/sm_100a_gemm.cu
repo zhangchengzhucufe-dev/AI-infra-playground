@@ -70,7 +70,7 @@ extern "C" __global__ void __launch_bounds__(256, 1) main_kernel(__grid_constant
           }
           #pragma unroll
           for (int i_2 = 0; i_2 < 2; ++i_2) {
-            tl::ptx_ldmatrix_x4_trans((&(((half_t*)B_s)[(((((k_1 % 3) * 2048) + (ki * 1024)) + (((((int)threadIdx.x) & 15) >> 3) * 512)) + ((((((((int)threadIdx.x) & 15) * 64) + (((((((int)threadIdx.x) & 127) >> 6) + ((((int)threadIdx.x) & 7) >> 2)) & 1) * 32)) + (((((((int)threadIdx.x) & 3) >> 1) + i_2) & 1) * 16)) + (((((((int)threadIdx.x) & 31) >> 4) + (((int)threadIdx.x) & 1)) & 1) * 8)) & 511))])), (&(B_local[(i_2 * 8)])));
+            tl::ptx_ldmatrix_x4_trans((&(((half_t*)B_s)[(((((((k_1 % 3) * 2048) + (ki * 1024)) + ((((int)threadIdx.x) & 15) * 64)) + (((((((int)threadIdx.x) & 127) >> 6) + ((((int)threadIdx.x) & 7) >> 2)) & 1) * 32)) + (((((((int)threadIdx.x) & 3) >> 1) + i_2) & 1) * 16)) + (((((((int)threadIdx.x) & 31) >> 4) + (((int)threadIdx.x) & 1)) & 1) * 8))])), (&(B_local[(i_2 * 8)])));
           }
           for (int i_3 = 0; i_3 < 2; ++i_3) {
             for (int j = 0; j < 2; ++j) {

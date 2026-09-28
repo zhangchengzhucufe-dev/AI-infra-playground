@@ -1,8 +1,11 @@
-# 说明：本文件转录自一次成功采集的 ncu 原始输出（驱动权限临时放开时采到）。
-# 命令：ncu --metrics l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum,l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum --csv ./bin/m1_sm80/05_ldsm_stride
-# 机器：WSL2 + RTX 3060 Laptop GPU，ncu 2024.3.2；每个 kernel 两次 launch，数值一致。
-# 该驱动（610.43.02 WSL）下此权限不持久：注册表 RmProfilingAdminOnly=0 不生效，
-# 控制面板"管理 GPU 性能计数器"开关即时有效但 GPU 断电唤醒后回退，管理员终端进 WSL 也不继承。
+# Transcribed from one successful raw ncu capture (taken while driver
+# profiling permission was temporarily opened up).
+# Command: ncu --metrics l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum,l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum --csv ./bin/m1_sm80/05_ldsm_stride
+# Machine: WSL2 + RTX 3060 Laptop GPU, ncu 2024.3.2; two launches per kernel, identical values.
+# Under this driver (610.43.02 WSL) the permission does not persist: registry
+# RmProfilingAdminOnly=0 has no effect, the control panel "Manage GPU performance
+# counters" toggle works immediately but reverts after the GPU loses power, and
+# an admin terminal entering WSL does not inherit it either.
 "ID","Process ID","Process Name","Host Name","Kernel Name","Context","Stream","Block Size","Grid Size","Device","CC","Section Name","Metric Name","Metric Unit","Metric Value"
 "0","3962","05_ldsm_stride","127.0.0.1","void ldsm_kernel<32>(unsigned int *, long long *)","1","7","(256, 1, 1)","(1, 1, 1)","0","8.6","Command line profiler metrics","l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum","","131072"
 "0","3962","05_ldsm_stride","127.0.0.1","void ldsm_kernel<32>(unsigned int *, long long *)","1","7","(256, 1, 1)","(1, 1, 1)","0","8.6","Command line profiler metrics","l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum","","262144"

@@ -1,51 +1,39 @@
-# 用法(在 cuda/ 目录下执行):
-#   make bin/m5_lowprec/03a_encode_check    编译单个练习
-#   make run/m5_lowprec/03a_encode_check    编译并运行
-#   ARCH=89 make ...                        指定目标架构(默认 100f)
+# Build one program:   make bin/fragments/fragment_map   |   make run/fragments/fragment_map
 #
-# ARCH 取值举例:100f(B200/B300 家族,默认)、103a(B300 专属指令)、
-# 90a(Hopper)、89(Ada)、120a(5090)。
+# Everything in this topic runs on any sm_80+ GPU; ARCH defaults to native
+# (the local card). Pin it with ARCH=sm_80 on GPU-less build nodes.
 #
-# 本作业统一用显式 -gencode 而不用 -arch=sm_XXXa 简写:CUDA 13.0 下简写
-# 会把用户代码的 PTX target 展开成不带后缀的 compute_XXX,arch-specific
-# 指令(如 e2m1 的 cvt)会被 ptxas 拒绝,报错还误导为"指令不支持"。
+# Like the other tensor-core topics here, this always uses explicit -gencode
+# when a non-native arch is requested, never the -arch=sm_XXXa shorthand:
+# under CUDA 13.0 the shorthand expands the user-code PTX target to a bare
+# compute_XXX, and ptxas then rejects arch-specific instructions with a
+# misleading "instruction not supported".
 
 NVCC  ?= nvcc
-ARCH  ?= 100f
-FLAGS ?= -O2 -std=c++17 -I. --expt-relaxed-constexpr
+ARCH  ?= native
+FLAGS ?= -O2 -std=c++20 -I. --expt-relaxed-constexpr
 
-# 问题 4.3 的流水级数:STAGES=4 make -B bin/m4_gemm/03_pipeline
-# -B 不能省——只改 -D 不改源文件,make 会认为目标是新鲜的。
-ifdef STAGES
-FLAGS += -DSTAGES=$(STAGES)
-endif
-
+ifneq ($(ARCH),native)
 GENCODE = -gencode arch=compute_$(ARCH),code=sm_$(ARCH)
+NVCC_FLAGS = $(FLAGS) $(GENCODE)
+else
+NVCC_FLAGS = $(FLAGS) -arch=native
+endif
 
 bin/%: %.cu common.h
 	@mkdir -p $(dir $@)
-	$(NVCC) $(FLAGS) $(GENCODE) -o $@ $<
-
-# 消费端验证(问题 5.3)要链 cublasLt
-bin/m5_lowprec/test_fp4_gemm: m5_lowprec/test_fp4_gemm.cu common.h
-	@mkdir -p $(dir $@)
-	$(NVCC) $(FLAGS) $(GENCODE) -lcublasLt -o $@ $<
-
-# M4(m4_gemm/)要链 cublas(判测参考)与 cuda 驱动 API(tensor map)。
-# 运行时若报 libcublas.so 找不到,把 CUDA 安装目录下的 lib 路径加进
-# LD_LIBRARY_PATH。
-bin/m4_gemm/%: m4_gemm/%.cu common.h
-	@mkdir -p $(dir $@)
-	$(NVCC) $(FLAGS) $(GENCODE) -lcublas -lcuda -o $@ $<
+	$(NVCC) $(NVCC_FLAGS) -MMD -MF bin/$*.d -o $@ $<
 
 run/%: bin/%
 	./$<
 
 ptx/%: %.cu common.h
-	$(NVCC) $(FLAGS) $(GENCODE) -ptx -o $*.ptx $<
-	@echo "已生成 $*.ptx"
+	$(NVCC) $(FLAGS) -ptx -o $*.ptx $<
+	@echo "wrote $*.ptx"
 
 clean:
-	rm -rf bin */*.ptx
+	rm -rf bin *.ptx
+
+-include $(wildcard bin/*.d)
 
 .PHONY: run/% ptx/% clean

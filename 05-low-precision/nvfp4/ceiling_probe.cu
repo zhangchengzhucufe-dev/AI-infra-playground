@@ -1,15 +1,15 @@
-// 问题 5.3(c):ceiling 探针。
+// Bandwidth ceiling probe for the NVFP4 quantization access pattern.
 //
-// 目标:测出"5.3(b) 这种访存形状的上限带宽"。方法是写一个和你的
-// quant kernel 访存完全同形(读同样的 bf16、写同样位置的 8 byte 数据
-// 与 1 byte SF)、但不做任何数学的 kernel——读进来的位 xor 一下直接
-// 写出去即可。它的耗时就是这个访存模式在这块卡上的地板。
+// The kernel performs exactly the same memory traffic as the quant kernel
+// (reads the same bf16, writes the 8 bytes of data and 1 byte of scale
+// factor to the same places) with no math -- xor the bits read in and
+// write them straight out. Its runtime is the floor for this access
+// pattern on this card.
 //
-// 跑完把三个数放在一起:探针 GB/s、你的 quant kernel GB/s(03b 的
-// 输出)、两者比值。报告里回答:你的 kernel 离自己的上限还有多远,
-// 差距是访存还是计算(ncu 的 SM% / DRAM% 可以佐证)。
-//
-// 在下面实现探针 kernel 和 launch;main 不需要修改。
+// Read three numbers together: probe GB/s, the quant kernel's GB/s, and
+// their ratio -- how far the quant kernel is from its own ceiling, and
+// whether the remaining gap is memory or compute (ncu's SM% / DRAM%
+// settles that).
 #include <vector>
 #include <random>
 #include "../common.h"
@@ -19,9 +19,10 @@ template <int BLOCK>
 __global__ void probe_kernel(const __nv_bfloat16* __restrict__ in,
                              uint8_t* __restrict__ dataOut,
                              uint8_t* __restrict__ sfOut, int M, int K) {
-    // 与 quant kernel 完全相同的访存形状:一线程一组,读 16 个 bf16,
-    // 写 8 byte 数据 + 1 byte SF;区别只是不量化,读进来的位 xor 后
-    // 直通(防编译器把访存优化掉)。
+    // Exactly the quant kernel's access shape: one thread per group, reads
+    // 16 bf16, writes 8 bytes of data + 1 byte of SF; the only difference
+    // is no quantization -- xor the bits read in and pass them through
+    // (keeps the compiler from optimizing the traffic away).
     long g = (long)blockIdx.x * BLOCK + threadIdx.x;
     int groupsPerRow = K / NVFP4_GROUP;
     long total = (long)M * groupsPerRow;
@@ -50,7 +51,8 @@ __global__ void probe_kernel(const __nv_bfloat16* __restrict__ in,
 
 static void launch_probe(const __nv_bfloat16* in, uint8_t* dataOut,
                          uint8_t* sfOut, int M, int K, int sms) {
-    // 启动配置与 launch_nvfp4_quant 完全一致,保证对比公平。
+    // Launch config identical to launch_nvfp4_quant so the comparison is fair.
+    (void)sms;  // kept in the signature to mirror the quant kernel's launcher
     constexpr int BLOCK = 256;
     long total = (long)M * (K / NVFP4_GROUP);
     int grid = (int)((total + BLOCK - 1) / BLOCK);

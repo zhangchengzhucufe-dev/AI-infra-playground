@@ -1,11 +1,15 @@
-// 问题 1.2:修 bug。这个程序发一条 m16n8k16 fp16 的 mma,判测会 FAIL。
+// A seeded fragment-layout bug, kept as a debug record: D rows 8-15 come
+// out wrong because register pairs a2/a3 and a6/a7 of the A fragment
+// miss the group+8 row offset -- they copy the rows of a0/a1 and a4/a5,
+// so the bottom half of D is computed from the top half of A. The data
+// makes the symptom exact: D rows 8-15 come out equal to the correct
+// values of rows 0-7 -- 64 of 128 entries wrong, top half clean. The
+// judge pins the symptom; the fix, applied in the code below, adds
+// group+8 to those four loads (a2/a3 and a6/a7 feed d2/d3, the D
+// fragment registers for row group+8, which is why exactly rows 8-15
+// are wrong).
 //
-// 提交时回答两问(先跑,后改):
-// (a) 描述错误症状:D 的哪些位置错,错成了什么样(和对的部分是什么
-//     关系)。
-// (b) 错的是哪个 fragment 的哪部分映射?为什么恰好产生 (a) 的症状?
-//
-// 运行:make run/m1_sm80/02_bug_fragment
+// Run: make run/fragments/bug_fragment
 #include <cuda_fp16.h>
 #include "../common.h"
 
@@ -14,17 +18,18 @@ __global__ void mma_buggy(const __half* A, const __half* B, float* D) {
     int group = lane >> 2;
     int tig = lane & 3;
 
-    // A fragment:8 个 fp16 逐个装载。
+    // A fragment: 8 fp16 loaded one by one.
     __half a0 = A[group * 16 + tig * 2];
     __half a1 = A[group * 16 + tig * 2 + 1];
-    // 修复:a2/a3 属于 fragment 的第二个寄存器,对应行 group+8、k 的前
-    // 两个元素;原代码抄了 a0/a1 的行号(少了 +8),于是 D 的下半场
-    // (rows 8-15) 拿 A 的上半场算,全错。
+    // Fix: a2/a3 belong to the fragment's second register -- row group+8,
+    // first two k elements. The original code copied a0/a1's row (missing
+    // +8), so the bottom half of D (rows 8-15) was computed from the top
+    // half of A.
     __half a2 = A[(group + 8) * 16 + tig * 2];
     __half a3 = A[(group + 8) * 16 + tig * 2 + 1];
     __half a4 = A[group * 16 + tig * 2 + 8];
     __half a5 = A[group * 16 + tig * 2 + 9];
-    // 同样的错还有一处:a6/a7 对应行 group+8、k 的后两个元素。
+    // Same bug in one more spot: a6/a7 are row group+8, last two k elements.
     __half a6 = A[(group + 8) * 16 + tig * 2 + 8];
     __half a7 = A[(group + 8) * 16 + tig * 2 + 9];
     unsigned ra[4];
@@ -58,7 +63,8 @@ __global__ void mma_buggy(const __half* A, const __half* B, float* D) {
 int main() {
     __half hA[16 * 16], hB[16 * 8];
     float ref[16 * 8] = {};
-    // A 的上下半特意不同,别改这份数据。
+    // A's top and bottom halves differ on purpose; that is what exposes
+    // the row-offset bug.
     for (int r = 0; r < 16; r++)
         for (int k = 0; k < 16; k++)
             hA[r * 16 + k] = __float2half((float)((r * 7 + k * 3) % 9 - 4));

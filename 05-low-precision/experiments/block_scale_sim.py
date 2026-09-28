@@ -1,23 +1,28 @@
-"""问题 5.2：block scaling 的两种乘回范围。
+"""Where the block scale multiplies back: two valid placements and one
+deliberately wrong control.
 
-这里只用 fp64 模拟 scale 的代数位置，不模拟窄精度舍入。
+fp64 only -- this simulates where the scale sits algebraically, not
+narrow-precision rounding.
 
 gemm_scale_per_row_col:
-    A 每行一个 scale，B 每行（即 GEMM 的每个输出列）一个
-    scale。scale 乘积在整个 K 归约中不变，可以在完整点积后
-    只乘回一次。
+    One scale per row of A, one per row of B (i.e. per output column of
+    the GEMM). The scale product is constant across the whole K
+    reduction, so it can be multiplied back once, after the full dot
+    product.
 
 gemm_scale_along_k:
-    scale 每 SEG 个 K 元素变一次。每个 K block 要先计算
-    量化视角的 partial sum，乘回该段的 sA*sB，再累加到输出。
+    The scale changes every SEG elements along K. Each K block first
+    computes its partial sum in quantized view, multiplies that
+    segment's sA*sB back in, then accumulates into the output.
 
 gemm_scale_along_k_one_restore:
-    题面中的反例。它把不同 K block 的归一化 partial sum 先相加，
-    最后只乘回第一段的 scale 乘积。因为 scale 乘积随 K block
-    改变，这个因子不能从整个 K 和式中提出，结果应与参考不同。
+    The wrong control. It adds the normalized partial sums of the
+    different K blocks first and multiplies back only the first
+    segment's scale product at the end. Because the scale product
+    changes from K block to K block, that factor cannot be pulled out of
+    the full K sum, so the result must differ from the reference.
 
-补全前两个函数后运行：
-    uv run pytest tests/test_block_scale.py
+Tests: pytest tests/test_block_scale.py
 """
 
 import torch
@@ -31,11 +36,13 @@ def gemm_fp64(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
 
 def gemm_scale_per_row_col(A: torch.Tensor, B: torch.Tensor,
                            sA: torch.Tensor, sB: torch.Tensor) -> torch.Tensor:
-    """sA: [M]，sB: [N]，均为正数。
+    """sA: [M], sB: [N], both positive.
 
-    row/column scale 在整个点积里都是常数，可以从求和里提出来：
-    sum_k (a_k/sA)(b_k/sB) * sA*sB = sum_k a_k b_k，
-    所以归一化后完整点积，最后在 [M, N] 上乘回一次 sA ⊗ sB。
+    The row/column scales are constant over the whole dot product and
+    factor out of the sum:
+    sum_k (a_k/sA)(b_k/sB) * sA*sB = sum_k a_k b_k,
+    so take the full dot product of the normalized inputs, then multiply
+    sA x sB back into [M, N] once.
     """
     qA = A.double() / sA[:, None]
     qB = B.double() / sB[:, None]
@@ -44,13 +51,16 @@ def gemm_scale_per_row_col(A: torch.Tensor, B: torch.Tensor,
 
 def gemm_scale_along_k(A: torch.Tensor, B: torch.Tensor,
                        sA: torch.Tensor, sB: torch.Tensor) -> torch.Tensor:
-    """sA: [M, K//SEG]，sB: [N, K//SEG]，均为正数。
+    """sA: [M, K//SEG], sB: [N, K//SEG], both positive.
 
-    scale 乘积随 K 段变化，不能从整个和式里提出——
-    sum_k x_k * c_k ≠ (sum_k x_k) * c_anything。
-    所以每个 K block 的归一化 partial sum 要先乘回该段的 sA*sB 再累加。
+    The scale product changes per K segment and does not factor out of
+    the whole sum --
+    sum_k x_k * c_k != (sum_k x_k) * c_anything.
+    So each K block's normalized partial sum must be multiplied by that
+    segment's sA*sB before it is accumulated.
     """
     M, K = A.shape
+    assert K % SEG == 0, "scale groups must tile K exactly; a ragged tail would be silently dropped"
     N = B.shape[0]
     out = torch.zeros((M, N), dtype=torch.float64)
     for block in range(K // SEG):
@@ -64,8 +74,9 @@ def gemm_scale_along_k(A: torch.Tensor, B: torch.Tensor,
 def gemm_scale_along_k_one_restore(A: torch.Tensor, B: torch.Tensor,
                                    sA: torch.Tensor,
                                    sB: torch.Tensor) -> torch.Tensor:
-    """故意错误的对照：只在整个 K 归约后乘回第一段 scale。"""
+    """Deliberately wrong control: multiplies back only the first segment's scale, after the whole K reduction."""
     M, K = A.shape
+    assert K % SEG == 0, "scale groups must tile K exactly; a ragged tail would be silently dropped"
     N = B.shape[0]
     normalized_sum = torch.zeros((M, N), dtype=torch.float64)
     for block in range(K // SEG):

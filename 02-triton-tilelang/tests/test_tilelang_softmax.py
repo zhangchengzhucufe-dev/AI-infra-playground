@@ -1,10 +1,10 @@
 import pytest
 import torch
 
-pytest.importorskip("tilelang", reason="需要安装 tilelang（uv sync --extra tilelang）")
+pytest.importorskip("tilelang", reason="tilelang not installed (uv sync --extra tilelang)")
 
 if not torch.cuda.is_available():
-    pytest.skip("TileLang 题需要 GPU，在集群上运行", allow_module_level=True)
+    pytest.skip("TileLang problems need a GPU; run on the cluster", allow_module_level=True)
 
 from kernels.tilelang_softmax import softmax
 
@@ -24,11 +24,12 @@ def test_wide_rows():
 
 
 def test_numerical_stability():
-    # 数值巨大的一行。不先减最大值的实现，exp 会溢出成 inf/nan。
+    # rows with huge values; without subtracting the max first,
+    # exp overflows to inf/nan.
     torch.manual_seed(2)
     x = torch.randn(4, 256, device="cuda") * 1000.0
     got = softmax(x)
-    assert torch.isfinite(got).all(), "出现 inf/nan——先减去行内最大值再做 exp"
+    assert torch.isfinite(got).all(), "inf/nan produced, subtract the row max before exp"
     torch.testing.assert_close(got, torch.softmax(x, dim=-1),
                                atol=1e-5, rtol=1e-5)
 

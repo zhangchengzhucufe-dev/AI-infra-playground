@@ -23,8 +23,8 @@ def make_mm(M=128, N=128, K=128, BM=64, BN=64, BK=32, dtype="float16"):
 
 
 if __name__ == "__main__":
-    import sys
-    outdir = "/home/zcz/xinwork/wmhpc-training-camp-x-lcpu-ai-infra-seminars/assignment02/m6_lowering"
+    import os
+    outdir = os.path.dirname(os.path.abspath(__file__))
     k = make_mm()
     for name, tgt in [("sm_90a", {"kind": "cuda", "arch": "sm_90a"}),
                       ("sm_100a", {"kind": "cuda", "arch": "sm_100a"})]:

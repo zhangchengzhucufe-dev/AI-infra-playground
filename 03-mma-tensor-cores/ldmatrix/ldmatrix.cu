@@ -1,100 +1,98 @@
-// 问题 1.4:把 1.3 的手工装载换成 ldmatrix,两条路径共存、都要 PASS。
+// The first_mma.cu fp16 tile (16x16 x 16x8), loaded two ways: per-element
+// smem reads + half2 packing vs ldmatrix. Both paths coexist behind the
+// template switch and both must PASS against the CPU reference on several
+// seeds (small integers, exact in fp16 and in the f32 accumulate, so the
+// comparison is strict equality).
+//   load_manual: first_mma.cu's index formulas, element by element.
+//   load_ldsm:   ldmatrix.x4 for A, .x2 for B, no .trans. A is row-major
+//                [16][16]; a 16B ldmatrix row covers 8 halves = half an A
+//                row, so the four matrices are (row half 0/1) x (k half
+//                0/1): lane l supplies &sA[8*(p&1) + (l&7)][8*(p>>1)] with
+//                p = l>>3. B is staged n-major in sBn ([8][16], each row
+//                32B); its fragment units are k-adjacent pairs, matrix 0 =
+//                k 0-7, matrix 1 = k 8-15: lane l supplies
+//                &sBn[l&7][16*(l>>3) bytes].
+// The data sits in smem (main copies it in from global); both paths load
+// from smem.
 //
-// 把你 1.3 的 kernel 拆成两个装载函数移植进来:
-//   load_manual:1.3 的逐 byte 手工装载(公式来自 1.1)
-//   load_ldsm:  用 ldmatrix 装载。A 是 fp8——ldmatrix 的元素是 16 个
-//               原始 bit,不关心类型;1.1 附加问的打包方向在这里起作用。
-//               变体(.x1/.x2/.x4、是否 .trans)自己从 PTX 文档选。
-// 数据已在 smem(main 里先从 global 拷入),两条路径都从 smem 装载。
+// Counting instructions in each path's smem->fragment section (cuobjdump
+// -sass on the built binary): the manual path pays per-element 16-bit smem
+// reads plus half2 packing and the address arithmetic; ldmatrix does the
+// same job with 2 instructions. The manual path cannot avoid that work:
+// each fragment register gathers two halves that are contiguous in memory
+// for A (so it could read b32 there -- but B's k-pairs are not contiguous
+// in the k-major layout, and keeping both paths layout-identical is the
+// honest comparison).
 //
-// 都 PASS 之后:make ptx/m1_sm80/04_ldmatrix 或 nvdisasm 反汇编,
-// 数两条路径 smem->fragment 段的指令构成(装载条数、地址算术条数),
-// 报告里回答:ldmatrix 消掉的是哪部分工作?为什么手工路径绕不开它?
-//
-// 运行:make run/m1_sm80/04_ldmatrix(内部两条路径各跑多 seed)
-#include <cuda_fp8.h>
-#include <cstdlib>
+// Run: make run/ldmatrix/ldmatrix (each path runs several seeds)
+#include <cuda_fp16.h>
 #include <random>
 #include "../common.h"
 
-// smem 布局:sA 按 [16][32] 行主序;B 备了两种布局——sBk 按 [32][8]
-// (k-major,1.3 用的就是它),sBn 按 [8][32](n-major,每个 n 的 32
-// 个 k 字节连续)。手工路径用哪种都行;ldmatrix 的每个"行地址"要求
-// 16 byte 连续,B 的 fragment 需要 k 方向相邻的字节成对进 b16——
-// 想清楚哪种布局能满足它。
-//
-// 手工装载:1.1 的公式逐字节收数。A 从 sA([16][32] 行主序)读,
-// B 从 sBk([32][8] k-major)读。
-__device__ void load_manual(const uint8_t* sA, const uint8_t* sBk,
-                            const uint8_t* sBn, unsigned (&a)[4],
+// smem layout: sA is [16][16] row-major (halves). B gets two layouts --
+// sBk is [16][8] (k-major, what the manual path reads) and sBn is [8][16]
+// (n-major, the 16 k values of each n contiguous). The manual path is
+// layout-agnostic; every ldmatrix "row address" must be 16 contiguous
+// bytes, and B's fragment needs k-adjacent halves paired into a b16 --
+// only the n-major layout satisfies that.
+__device__ void load_manual(const __half* sA, const __half* sBk,
+                            const __half* sBn, unsigned (&a)[4],
                             unsigned (&b)[2]) {
     int lane = threadIdx.x;
     int group = lane >> 2, tig = lane & 3;
-#pragma unroll
-    for (int r = 0; r < 4; r++) {
-        unsigned reg = 0;
-#pragma unroll
-        for (int j = 0; j < 4; j++) {
-            int row = group + ((r & 1) ? 8 : 0);
-            int col = tig * 4 + (r >> 1) * 16 + j;
-            reg |= (unsigned)sA[row * 32 + col] << (8 * j);
-        }
-        a[r] = reg;
-    }
-#pragma unroll
-    for (int r = 0; r < 2; r++) {
-        unsigned reg = 0;
-#pragma unroll
-        for (int j = 0; j < 4; j++) {
-            int k = tig * 4 + r * 16 + j;
-            reg |= (unsigned)sBk[k * 8 + group] << (8 * j);
-        }
-        b[r] = reg;
-    }
+    __half2* ah = reinterpret_cast<__half2*>(a);
+    ah[0] = __halves2half2(sA[group * 16 + tig * 2],
+                           sA[group * 16 + tig * 2 + 1]);
+    ah[1] = __halves2half2(sA[(group + 8) * 16 + tig * 2],
+                           sA[(group + 8) * 16 + tig * 2 + 1]);
+    ah[2] = __halves2half2(sA[group * 16 + tig * 2 + 8],
+                           sA[group * 16 + tig * 2 + 9]);
+    ah[3] = __halves2half2(sA[(group + 8) * 16 + tig * 2 + 8],
+                           sA[(group + 8) * 16 + tig * 2 + 9]);
+
+    __half2* bh = reinterpret_cast<__half2*>(b);
+    bh[0] = __halves2half2(sBk[(tig * 2) * 8 + group],
+                           sBk[(tig * 2 + 1) * 8 + group]);
+    bh[1] = __halves2half2(sBk[(tig * 2 + 8) * 8 + group],
+                           sBk[(tig * 2 + 9) * 8 + group]);
     (void)sBn;
 }
 
-// ldmatrix 装载。
-// A:16x32 的 fp8 按 b16 视角是 16 行 x 16 个 unit(1 unit = 2 个 fp8,
-//   沿 k 相邻)。fragment 的 reg r = (rowhalf = r&1, colhalf = r>>1) 的
-//   8x8 b16 tile,所以一次 .x4、四个 matrix 分别取
-//   (0,0) (1,0) (0,1) (1,1):lane l 为 matrix p = l>>3 提供第 l&7 行的
-//   起始地址,即 &sA[8*(p&1) + (l&7)][16*(p>>1)]。1.1 附加问的答案在这
-//   里兑现:同一 b32 里的 4 个 fp8 沿 k 相邻,恰好凑成 ldmatrix 的 16bit
-//   "元素",行主序 + 不带 .trans 正好落进寄存器。
-// B:fragment 的 16bit unit 是 (B[k][n], B[k+1][n])——k 相邻的同一列。
-//   sBk 里 k 相邻的元素差 8B 不连续,必须用 sBn(n-major,每列 32 个 k
-//   连续)才能满足 ldmatrix 的 16B 行地址要求。8 行(n) x 16 unit(k/2),
-//   .x2:matrix 0 = k 0-15,matrix 1 = k 16-31,lane 0-15 提供地址
-//   &sBn[(l&7)*32 + p*16]。
-__device__ void load_ldsm(const uint8_t* sA, const uint8_t* sBk,
-                          const uint8_t* sBn, unsigned (&a)[4],
+// ldmatrix loads. A: the 16x16 fp16 tile is 16 rows x 8 b16 units; the
+// fragment wants matrix p as (row half p&1, k half p>>1), which is one
+// .x4 with no .trans since the two halves of each register are k-adjacent
+// in row-major memory. B: the fragment unit is (B[k][n], B[k+1][n]) --
+// k-adjacent, same column; in sBn each n-row holds all 16 k contiguously,
+// so matrix 0 = k 0-7 at byte 0 and matrix 1 = k 8-15 at byte 16 of the
+// same row.
+__device__ void load_ldsm(const __half* sA, const __half* sBk,
+                          const __half* sBn, unsigned (&a)[4],
                           unsigned (&b)[2]) {
     int lane = threadIdx.x;
     int p = lane >> 3;
     unsigned addrA = (unsigned)__cvta_generic_to_shared(
-        sA + (8 * (p & 1) + (lane & 7)) * 32 + 16 * (p >> 1));
+        sA + (8 * (p & 1) + (lane & 7)) * 16 + 8 * (p >> 1));
     asm volatile(
         "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
         : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3])
         : "r"(addrA));
 
     unsigned addrB = (unsigned)__cvta_generic_to_shared(sBn +
-                                                        (lane & 7) * 32 +
-                                                        ((lane >> 3) & 1) * 16);
+                                                        (lane & 7) * 16 +
+                                                        ((lane >> 3) & 1) * 8);
     asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
                  : "=r"(b[0]), "=r"(b[1])
                  : "r"(addrB));
-    (void)sA; (void)sBk; (void)sBn;
+    (void)sA; (void)sBk;
 }
 
 template <bool USE_LDSM>
-__global__ void mma_kernel(const uint8_t* A, const uint8_t* B, float* D) {
-    __shared__ uint8_t sA[16 * 32], sBk[32 * 8], sBn[8 * 32];
-    for (int i = threadIdx.x; i < 16 * 32; i += 32) sA[i] = A[i];
-    for (int i = threadIdx.x; i < 32 * 8; i += 32) {
+__global__ void mma_kernel(const __half* A, const __half* B, float* D) {
+    __shared__ __half sA[16 * 16], sBk[16 * 8], sBn[8 * 16];
+    for (int i = threadIdx.x; i < 16 * 16; i += 32) sA[i] = A[i];
+    for (int i = threadIdx.x; i < 16 * 8; i += 32) {
         sBk[i] = B[i];
-        sBn[(i & 7) * 32 + (i >> 3)] = B[i];  // 转成 n-major
+        sBn[(i & 7) * 16 + (i >> 3)] = B[i];  // repack to n-major
     }
     __syncwarp();
     unsigned a[4], b[2];
@@ -104,7 +102,7 @@ __global__ void mma_kernel(const uint8_t* A, const uint8_t* B, float* D) {
         load_manual(sA, sBk, sBn, a, b);
     float c[4] = {0, 0, 0, 0}, d[4];
     asm volatile(
-        "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
         "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
         : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
@@ -118,24 +116,19 @@ __global__ void mma_kernel(const uint8_t* A, const uint8_t* B, float* D) {
 
 static int run_path(bool ldsm, unsigned seed) {
     std::mt19937 rng(seed);
-    std::uniform_int_distribution<int> dist(0, 15);
-    uint8_t hA[16 * 32], hB[32 * 8];
-    float fA[16 * 32], fB[32 * 8], ref[16 * 8] = {};
-    for (int i = 0; i < 16 * 32; i++) {
-        __nv_fp8_e4m3 v = __nv_fp8_e4m3((float)(dist(rng) - 8));
-        hA[i] = *(uint8_t*)&v;
-        fA[i] = float(v);
-    }
-    for (int i = 0; i < 32 * 8; i++) {
-        __nv_fp8_e4m3 v = __nv_fp8_e4m3((float)(dist(rng) - 8));
-        hB[i] = *(uint8_t*)&v;
-        fB[i] = float(v);
-    }
+    std::uniform_int_distribution<int> dist(0, 7);
+    __half hA[16 * 16], hB[16 * 8];
+    float ref[16 * 8] = {};
+    for (int i = 0; i < 16 * 16; i++)
+        hA[i] = __float2half((float)(dist(rng) - 4));
+    for (int i = 0; i < 16 * 8; i++)
+        hB[i] = __float2half((float)(dist(rng) - 4));
     for (int r = 0; r < 16; r++)
         for (int n = 0; n < 8; n++)
-            for (int k = 0; k < 32; k++)
-                ref[r * 8 + n] += fA[r * 32 + k] * fB[k * 8 + n];
-    uint8_t *dA, *dB;
+            for (int k = 0; k < 16; k++)
+                ref[r * 8 + n] += __half2float(hA[r * 16 + k]) *
+                                  __half2float(hB[k * 8 + n]);
+    __half *dA, *dB;
     float* dD;
     CUDA_CHECK(cudaMalloc(&dA, sizeof(hA)));
     CUDA_CHECK(cudaMalloc(&dB, sizeof(hB)));

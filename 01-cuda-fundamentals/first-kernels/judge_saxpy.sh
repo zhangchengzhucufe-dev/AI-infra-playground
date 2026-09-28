@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
-# 问题 2.9（压轴）的评测脚本，自带对拍。
-# 用法：./judge_saxpy.sh [你的源文件，默认 saxpy.cu]
-# 环境变量：ARCH=sm_80 指定目标架构（默认 native，即当前这块卡；编译节点无卡时要指定）
-#           WMHPC_RESULT=1 额外输出一行机器可读的 ##RESULT
-# contract 见 handout：./saxpy <n> 会按固定公式生成 x、y，在 GPU 上算 y = 2x + y，
-# 输出一行 SUM=<所有 y[i] 之和>，退出码 0。
-# 脚本用同样的公式在 CPU 上独立算一遍期望值，和你的 SUM 对照——
-# 公式生成的值都是较小的整数或半整数，float 下能精确表示，直接比较整数值即可。
+# Judge for saxpy.cu, with its own independent reference check.
+# Usage: bash first-kernels/judge_saxpy.sh first-kernels/saxpy.cu   (topic root)
+#        bash judge_saxpy.sh                                        (defaults to
+#        the sibling saxpy.cu; or pass any path to a saxpy source file)
+# Env vars: ARCH=sm_80 sets the target arch (default native, i.e. this machine's
+#           GPU; set it explicitly when compiling on a GPU-less node)
+#           WMHPC_RESULT=1 additionally emits a machine-readable ##RESULT line
+# Builds the given source, then runs 7 cases (n = 0 1 31 1024 1025 1048576
+# 1048579). Each case checks the program's contract: ./saxpy <n> generates x, y
+# from the fixed formula, computes y = 2x + y on the GPU, prints one line
+# SUM=<sum of all y[i]>, exit code 0. The expected SUM is computed independently
+# on the CPU with the same formula -- all formula values are small integers or
+# half-integers, exactly representable in float, so integer comparison suffices.
+# Prints one PASS line per case and "all passed" at the end; exit code 0 only
+# when every case passes.
 set -u
-SRC="${1:-saxpy.cu}"
+SRC="${1:-$(dirname "$0")/saxpy.cu}"
 ARCH="${ARCH:-native}"
 BIN="$(mktemp -u /tmp/saxpy.XXXXXX)"
 
@@ -16,18 +23,18 @@ emit_result() {  # $1=status $2=metrics_json
     [[ "${WMHPC_RESULT:-0}" == "0" || -z "${WMHPC_RESULT:-}" ]] && return 0
     local dev
     dev="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)"
-    printf '##RESULT {"prob":"2.9","status":"%s","metrics":%s,"device":"%s"}\n' \
+    printf '##RESULT {"name":"saxpy","status":"%s","metrics":%s,"device":"%s"}\n' \
         "$1" "$2" "${dev:-unknown}"
 }
 
 if [[ ! -f "$SRC" ]]; then
-    echo "找不到 $SRC"
+    echo "file not found: $SRC"
     emit_result "not_attempted" '{}'
     exit 1
 fi
 
-if ! nvcc -O2 -std=c++17 -arch="$ARCH" -o "$BIN" "$SRC"; then
-    echo "编译失败"
+if ! nvcc -O2 -std=c++20 -arch="$ARCH" -o "$BIN" "$SRC"; then
+    echo "compile failed"
     emit_result "compile_error" '{}'
     exit 1
 fi
@@ -57,7 +64,7 @@ for n in 0 1 31 1024 1025 1048576 1048579; do
         echo "n=$n  PASS  (SUM=$got)"
         npass=$((npass + 1))
     else
-        echo "n=$n  FAIL  (期望 SUM=$want，退出码 $rc，你的输出如下)"
+        echo "n=$n  FAIL  (expected SUM=$want, exit code $rc, your output below)"
         printf '%s\n' "$out" | head -5
         fail=1
     fi
@@ -66,7 +73,7 @@ rm -f "$BIN"
 
 metrics="$(printf '{"cases_total":%d,"cases_passed":%d}' "$ntotal" "$npass")"
 if [[ $fail -eq 0 ]]; then
-    echo "全部通过"
+    echo "all passed"
     emit_result "pass" "$metrics"
 else
     emit_result "fail" "$metrics"

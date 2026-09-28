@@ -1,29 +1,35 @@
-// 问题 2.2:SM100 的 64 位 smem matrix descriptor。
+// SM100's 64-bit smem matrix descriptor: the field packing, plus the
+// LBO/SBO/layout values for three smem layouts of a 64x64 bf16 B tile
+// (to be consumed by tcgen05):
+//   Scenario 1: K-major, no swizzle, tile start smem address 0x1000.
+//           The canonical layout's atom is 8 rows x 16B tightly packed
+//           (128B contiguous); LBO/SBO follow from the atom strides
+//           along K and along MN.
+//   Scenario 2: K-major, 128B swizzle, start address 0x2000.
+//   Scenario 3: MN-major, 128B swizzle, start address 0x3000.
 //
-// 场景都是 64x64 bf16 的 B tile(供 tcgen05 消费),三种 smem 布局:
-//   场景 1:K-major,无 swizzle,tile 起始 smem 地址 0x1000。
-//           canonical 布局的 atom 是 8 行 x 16B 紧密打包(128B 连续),
-//           atom 沿 K、沿 MN 各按什么步距排,自己从布局推 LBO/SBO。
-//   场景 2:K-major,128B swizzle,起始地址 0x2000。
-//   场景 3:MN-major,128B swizzle,起始地址 0x3000。
+// make_desc packs the parameters into the 64 bits field by field.
+// SM100 fields (note the differences from the sm90 wgmma version):
+// start_address bits[0,14) = addr >> 4;
+// LBO bits[16,30) = lbo >> 4; SBO bits[32,46) = sbo >> 4;
+// version bits[46,48) fixed at 1; layout_type bits[61,64), 3 bits:
+// NONE=0, 128B=2, 64B=4, 32B=6 (sm90 uses 2 bits and 128B=1).
 //
-// 两层任务:
-//   (a) make_desc:按位域把参数编进 64 位。SM100 版位域(注意与课上
-//       sm90 wgmma 版的差异):start_address bit[0,14) 右移 4;
-//       LBO bit[16,30) 右移 4;SBO bit[32,46) 右移 4;
-//       version bit[46,48) 固定 1;layout_type bit[61,64) 3 bit:
-//       NONE=0、128B=2、64B=4、32B=6(sm90 是 2 bit 且 128B=1)。
-//   (b) 三个场景各自的 LBO / SBO / layout 填进 SCEN 表。
-// 提示:swizzle 模式下 LBO 被硬件忽略,按 0 填;场景 2 和场景 3 的
-// 描述符会相同——报告里回答:MN-major 与 K-major 的区别去了哪里?
+// With swizzle, LBO is ignored by hardware -- filled 0. Scenarios 2 and
+// 3 come out identical: at 64x64 bf16 the SBO is 1024B in either
+// direction, and the K-major vs MN-major difference would only show up
+// in LBO, which the swizzled layouts ignore.
 //
-// 判测真值来自在 B300 上实际发 tcgen05 验证过的描述符(3.2 的程序用的
-// 就是这三组)。运行:make run/m2_smem/02_descriptor(无卡可判)。
+// The expected values were exercised with tcgen05 on a B300 (borrowed
+// time on a lab machine), so they reflect what real hardware reads.
+// The check itself is host-only and runs anywhere.
+// Run: make run/smem/descriptor
 #include <cstdio>
 #include <cstdint>
 
-// (a) 按位域编码:各字段值先右移 4(16B 粒度)再放进自己的位段,
-//     version 固定 1,layout 直接占 bit[61,64)。
+// Field encoding: each value is shifted right by 4 first (16B
+//     granularity), then placed into its own bit field; version is
+//     fixed at 1, and layout takes bits[61,64) directly.
 static uint64_t make_desc(uint32_t saddr, uint32_t lbo, uint32_t sbo,
                           uint32_t layout) {
     uint64_t d = 0;
@@ -35,22 +41,27 @@ static uint64_t make_desc(uint32_t saddr, uint32_t lbo, uint32_t sbo,
     return d;
 }
 
-// (b) 场景 1(K-major 无 swizzle):atom = 8k x 8n(16B),atom 内 8 个 n
-//     紧密打包成 128B。leading 方向沿 K:相邻 atom(K+8)差 128B → LBO=128;
-//     strided 方向沿 N:相邻 atom(N+8)跨过一整个 n 组 = 8n x 64k x 2B
-//     = 1024B → SBO=1024;layout = NONE。
-// 场景 2(K-major 128B swizzle):LBO 被硬件忽略填 0;swizzle 后 atom 仍按
-//     128B 一块、n 组之间还是 1024B → SBO=1024;layout = 128B(编码 2)。
-// 场景 3(MN-major 128B swizzle):atom = 8n x 16B 沿 N 连续;strided 方向
-//     沿 K:8k x 64n x 2B = 1024B → SBO=1024;LBO 忽略填 0;layout = 128B。
-//     (64x64 的 tile 让两个方向的 SBO 算出来恰好一样,所以和场景 2 全同。)
+// Scenario 1 (K-major, no swizzle): atom = 8k x 8n (16B), the 8 n
+//     within an atom pack tightly into 128B. Leading direction is
+//     along K: adjacent atoms (K+8) are 128B apart -> LBO=128; strided
+//     direction is along N: adjacent atoms (N+8) skip a whole n group
+//     = 8n x 64k x 2B = 1024B -> SBO=1024; layout = NONE.
+// Scenario 2 (K-major, 128B swizzle): LBO is ignored by hardware, fill
+//     0; after swizzling, atoms still move in 128B blocks and n groups
+//     are still 1024B apart -> SBO=1024; layout = 128B (encoding 2).
+// Scenario 3 (MN-major, 128B swizzle): atom = 8n x 16B contiguous
+//     along N; strided direction along K: 8k x 64n x 2B = 1024B ->
+//     SBO=1024; LBO ignored, fill 0; layout = 128B.
+//     (The 64x64 tile makes SBO come out the same in both directions,
+//     so this is exactly identical to scenario 2.)
 static const uint32_t SCEN[3][3] = {
-    {128, 1024, 0},  // 场景 1:K-major,无 swizzle
-    {0, 1024, 2},    // 场景 2:K-major,128B swizzle
-    {0, 1024, 2},    // 场景 3:MN-major,128B swizzle
+    {128, 1024, 0},  // scenario 1: K-major, no swizzle
+    {0, 1024, 2},    // scenario 2: K-major, 128B swizzle
+    {0, 1024, 2},    // scenario 3: MN-major, 128B swizzle
 };
 
-// 以下为判测,不需要修改。不匹配时按字段报差异,不打印期望值。
+// Check below. On mismatch it reports the differing
+// fields, without printing the expected values.
 static const uint32_t ADDR[3] = {0x1000, 0x2000, 0x3000};
 static const uint64_t TRUTH[3] = {0x0000404000080100ull, 0x4000404000000200ull,
                                   0x4000404000000300ull};
@@ -62,7 +73,7 @@ static void field_diff(uint64_t got, uint64_t want) {
     for (auto& x : f) {
         uint64_t g = (got >> x.lo) & ((1ull << x.w) - 1);
         uint64_t w = (want >> x.lo) & ((1ull << x.w) - 1);
-        if (g != w) printf("    字段 %s 不一致(yours=0x%llx)\n", x.name,
+        if (g != w) printf("    field %s mismatch (yours=0x%llx)\n", x.name,
                            (unsigned long long)g);
     }
 }
@@ -72,11 +83,11 @@ int main() {
     for (int i = 0; i < 3; i++) {
         uint64_t got = make_desc(ADDR[i], SCEN[i][0], SCEN[i][1], SCEN[i][2]);
         if (got != TRUTH[i]) {
-            printf("场景 %d FAIL:\n", i + 1);
+            printf("scenario %d FAIL:\n", i + 1);
             field_diff(got, TRUTH[i]);
             bad++;
         } else {
-            printf("场景 %d PASS\n", i + 1);
+            printf("scenario %d PASS\n", i + 1);
         }
     }
     return bad != 0;

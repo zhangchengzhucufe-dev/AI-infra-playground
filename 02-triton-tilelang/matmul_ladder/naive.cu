@@ -1,7 +1,10 @@
-// Bonus（选做）：naive 矩阵乘法。
-// 任务：修改 BS（Block Size）的数值，每次改完后重新编译测试，统计 GFLOPS。
-//   make bin/bonus/matmul && ./bin/bonus/matmul
-//   nvcc -O2 -std=c++17 -I. -arch=native -DBS=8 -o bin/bonus/matmul_bs8 bonus/matmul.cu
+// Naive tiled CUDA matmul: BSxBS thread blocks, one thread per output
+// element -- the baseline rung of the matmul ladder (the Triton, TileLang,
+// and cuBLAS rungs live alongside). Rebuild with -DBS=<n> and rerun per
+// block size; prints per-block-size GFLOPS for comparison across rungs.
+//   make bin/matmul_ladder/naive && ./bin/matmul_ladder/naive
+//   nvcc -O2 -std=c++20 -Imatmul_ladder -arch=native -DBS=8 -o
+//       bin/matmul_ladder/naive_bs8 matmul_ladder/naive.cu
 #include "common.h"
 
 #ifndef BS
@@ -34,7 +37,7 @@ int main() {
     for (long i = 0; i < (long)M * K; i++) h_A[i] *= 0.1f;
     for (long i = 0; i < (long)K * N; i++) h_B[i] *= 0.1f;
 
-    // CPU 参考（1024^3 次乘加，要几秒钟，耐心）。
+    // CPU reference (1024^3 multiply-adds; takes a few seconds, be patient).
     for (int i = 0; i < M; i++)
         for (int j = 0; j < N; j++) {
             double acc = 0;
@@ -52,7 +55,7 @@ int main() {
     dim3 threads(BS, BS);
     dim3 blocks((N + BS - 1) / BS, (M + BS - 1) / BS);
 
-    matmul_naive<<<blocks, threads>>>(d_A, d_B, d_C, M, N, K);  // 热身
+    matmul_naive<<<blocks, threads>>>(d_A, d_B, d_C, M, N, K);  // warm-up
     CUDA_CHECK_KERNEL();
     CUDA_CHECK(cudaMemcpy(h_C, d_C, bytesC, cudaMemcpyDeviceToHost));
     if (!check_close(h_C, h_ref, (long)M * N, 1e-2f)) REPORT(0);
@@ -66,7 +69,7 @@ int main() {
     CUDA_CHECK_KERNEL();
 
     double gflops = 2.0 * M * N * K / (ms * 1e-3) / 1e9;
-    printf("BS=%d  平均 %.3f ms  %.1f GFLOPS\n", BS, ms, gflops);
+    printf("BS=%d  avg %.3f ms  %.1f GFLOPS\n", BS, ms, gflops);
     REPORT(1);
     return 0;
 }

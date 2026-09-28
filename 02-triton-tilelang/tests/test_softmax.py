@@ -1,6 +1,6 @@
 import torch
 
-from kernels.softmax import softmax
+from kernels.triton_softmax import softmax
 
 
 def _device():
@@ -22,11 +22,12 @@ def test_wide_rows():
 
 
 def test_numerical_stability():
-    # 数值巨大的一行。不先减最大值的实现，exp 会溢出成 inf/nan。
+    # rows with huge values; without subtracting the max first,
+    # exp overflows to inf/nan.
     torch.manual_seed(2)
     x = torch.randn(4, 256, device=_device()) * 1000.0
     got = softmax(x)
-    assert torch.isfinite(got).all(), "出现 inf/nan——先减去行内最大值再做 exp"
+    assert torch.isfinite(got).all(), "inf/nan produced, subtract the row max before exp"
     torch.testing.assert_close(got, torch.softmax(x, dim=-1),
                                atol=1e-5, rtol=1e-5)
 

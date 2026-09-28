@@ -1,10 +1,10 @@
 import pytest
 import torch
 
-tilelang = pytest.importorskip("tilelang", reason="需要安装 tilelang（uv sync --extra tilelang）")
+tilelang = pytest.importorskip("tilelang", reason="tilelang not installed (uv sync --extra tilelang)")
 
 if not torch.cuda.is_available():
-    pytest.skip("TileLang 题需要 GPU，在集群上运行", allow_module_level=True)
+    pytest.skip("TileLang problems need a GPU; run on the cluster", allow_module_level=True)
 
 
 def test_scale_add():
@@ -29,7 +29,7 @@ def test_copy2d():
 
 
 def test_matmul():
-    from kernels.tilelang_matmul import make_matmul
+    from matmul_ladder.tilelang import make_matmul
 
     M, N, K = 256, 256, 128
     func = make_matmul(M, N, K, BLOCK_M=64, BLOCK_N=64, BLOCK_K=32)

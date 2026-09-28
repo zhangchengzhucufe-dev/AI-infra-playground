@@ -1,11 +1,14 @@
-"""问题 7.4：TileLang 版二维缩放拷贝（填空）。
+"""TileLang 2D scaled copy through shared memory: Y = 2 * X on an (M, N) tile.
 
-Y = 2 * X，X 形状 (M, N)，M、N 都不保证整除 tile 边长 (类似 prob 2.6 )
-。这次把 tile 先搬进 shared memory，算完再写回：数据搬运交给
-T.copy.
-填完对照 2.6 想一想：行列号、边界保护、grid 尺寸这几个空，
-哪些在这里还有对应，哪些被 T.copy 吃掉了。
-需要 GPU 和 tilelang（uv sync --extra tilelang），在集群上运行：
+Same grid as tilelang_scale_add, but the tile now stages through shared
+memory -- and every data movement is one T.copy call, which absorbs the
+bounds handling for ragged tails (M/N need not divide the tile size).
+Compare with a hand-written CUDA 2D kernel: the row/col tile origin and the
+grid math are still yours; the per-element index math and bounds guard are
+the compiler's.
+
+Needs a GPU and tilelang (pip install -e '.[tilelang]'):
+
     pytest tests/test_tilelang.py -k copy2d
 """
 
@@ -19,21 +22,18 @@ def make_scale2d(M, N, block_M=32, block_N=32, dtype="float32"):
         X: T.Buffer((M, N), dtype),
         Y: T.Buffer((M, N), dtype),
     ):
-        # ====== 空 1：二维 CTA grid，和 7.3 一样——x 方向管 N 列，
-        #         y 方向管 M 行，提示：T.ceildiv ======
+        # 2D CTA grid: x covers the N columns, y the M rows
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M),
                       threads=128) as (bx, by):
             X_shared = T.alloc_shared((block_M, block_N), dtype)
 
-            # ====== 空 2：把当前 tile 从 X 搬进 shared。
-            #         提示：T.copy(X[行起点, 列起点]， X_shared)，
-            #         越界部分 T.copy 会自己处理 ======
+            # stage the current tile into shared; T.copy handles the tail
             T.copy(X[by * block_M, bx * block_N], X_shared)
 
             for i, j in T.Parallel(block_M, block_N):
                 X_shared[i, j] = X_shared[i, j] * 2.0
 
-            # ====== 空 3：把算完的 tile 写回 Y 的同一位置 ======
+            # store the computed tile back at the same position in Y
             T.copy(X_shared, Y[by * block_M, bx * block_N])
 
     return scale2d

@@ -1,9 +1,13 @@
-// 问题 4.7：访存模式与带宽。
-// 同一个 kernel，只改读取的步长。
+// Memory-access pattern vs effective bandwidth: the same kernel, run with read
+// strides of 1, 2, 4, ..., 32 floats. Stride 1 is fully coalesced; as the
+// stride grows, adjacent lanes in a warp land stride floats apart, each 32-lane
+// access spreads over more 128-byte transactions, and throughput falls.
+// n is a power of two, so & (n-1) is a cheap modulo. Prints a stride/ms/GB/s
+// table.
 #include "common.h"
 
-// stride = 1 时是连续访问；stride 变大后，warp 里相邻线程读的地址
-// 相距 stride 个 float。n 是 2 的幂，& (n-1) 等价于取模。
+// stride = 1 is the coalesced case; at stride s, neighboring lanes in a warp
+// read addresses s floats apart. n is a power of two, so & (n-1) == % n.
 __global__ void strided_copy(const float *in, float *out, int n, int stride) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
@@ -13,7 +17,7 @@ __global__ void strided_copy(const float *in, float *out, int n, int stride) {
 }
 
 int main() {
-    const int n = 1 << 24;  // 16M 元素，2 的幂
+    const int n = 1 << 24;  // 16M elements, power of two
     size_t bytes = (size_t)n * sizeof(float);
 
     float *d_in, *d_out;
@@ -24,7 +28,7 @@ int main() {
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
 
-    strided_copy<<<blocks, threads>>>(d_in, d_out, n, 1);  // 热身
+    strided_copy<<<blocks, threads>>>(d_in, d_out, n, 1);  // warm-up
     CUDA_CHECK_KERNEL();
 
     const int reps = 20;
@@ -37,7 +41,7 @@ int main() {
             strided_copy<<<blocks, threads>>>(d_in, d_out, n, s);
         float ms = timer.stop_ms() / reps;
         CUDA_CHECK_KERNEL();
-        // 读 + 写各 4 字节。
+        // 4 bytes read + 4 bytes written per element.
         double gbps = 2.0 * bytes / (ms * 1e-3) / 1e9;
         printf("%8d %12.4f %12.1f\n", s, ms, gbps);
     }

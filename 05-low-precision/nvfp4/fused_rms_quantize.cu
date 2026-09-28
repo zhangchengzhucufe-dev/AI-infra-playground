@@ -1,24 +1,28 @@
-// 问题 5.4(全作业结束题):融合 rms_norm + NVFP4 quant。
+// Fused rms_norm + NVFP4 quantization.
 //
-// 背景见题面(vLLM issue #25179 / PR #36413):这个融合上游有两个未
-// 合入的 PR,卡在"端到端收益在噪声内,没人解释清楚收益去了哪"。
-// 你要做的是把 kernel 写出来,并给出那份解释。
+// Motivation from upstream vLLM (issue #25179 / PR #36413): two PRs for
+// this fusion are stuck because "the end-to-end gain is within noise and
+// nobody explained where the gain went" -- this program writes the kernel
+// and produces that explanation.
 //
-// 语义:y = rms_norm(x) * w 后直接量化为 NVFP4(不落 bf16 中间值)。
-//   rnorm = 1 / sqrt(mean(x_i^2) + eps),后续每组与 5.3(b) 相同
-// 字节账:两步(rms 写读中间值)6.56 B/elem,融合 2.56 B/elem,
-// 预言加速比 2.56x。你的任务:逐形状实测,并解释实测与预言的差距
-// ——每个 M 段的限制因素是什么,证据(ncu 或推算)是什么。
+// Semantics: y = rms_norm(x) * w, quantized straight to NVFP4 (no bf16
+// intermediate). rnorm = 1 / sqrt(mean(x_i^2) + eps); the per-group step
+// afterwards is identical to the standalone quant.
+// Byte accounting: two-step (rms writes and re-reads the intermediate)
+// 6.56 B/elem, fused 2.56 B/elem, predicted speedup 2.56x. The table below
+// measures per shape; the measured-vs-predicted gap is attributed per M
+// range (what limits each, with ncu or arithmetic as evidence).
 //
-// 本文件给出:两步基线(下面的 rms_norm_baseline_kernel + 你 5.3(b)
-// 的 quant kernel)、判测、逐形状计时框架。三处要你动手:
-//   1. 实现融合 kernel(结构完全自由)
-//   2. 基线要公平:baseline 与融合各自把 grid 等配置调到最优再对比
-//      (基线吃亏的对比没有意义,上游 PR 的教训之一)
-//   3. 报告:逐形状表 + 差距归因
+// This file provides: the two-step baseline (rms_norm_baseline_kernel
+// below + the standalone quant kernel from nvfp4_quant_kernel.h), the
+// fused kernel, the correctness check, and the per-shape timing harness.
+// The comparison is only as good as the baseline: tune both sides to
+// their best before believing the speedup (one of the upstream PRs'
+// lessons).
 //
-// 判测口径:sumsq 归约顺序不同会让极少数处在舍入边界的值翻转,
-// 允许 1e-4 比例的 byte 不一致(host 参考的 sumsq 用 double)。
+// Tolerance: different sumsq reduction orders flip a tiny fraction of
+// values sitting on rounding boundaries, so up to 1e-4 of bytes may differ
+// (the host reference computes sumsq in double).
 #include <vector>
 #include <random>
 #include "../common.h"
@@ -26,8 +30,9 @@
 #include "e2m1_encode.h"
 #include "nvfp4_quant_kernel.h"
 
-// 给定的两步基线第一步:block-per-row 的 rms_norm,bf16 进出。
-// 允许修改或另写(公平基线的一部分:它调多快,对比就有多可信)。
+// Two-step baseline, first half: block-per-row rms_norm, bf16 in and out.
+// Part of the fair-baseline contract: the better this is tuned, the more
+// credible the comparison.
 template <int BLOCK>
 __global__ void rms_norm_baseline_kernel(const __nv_bfloat16* __restrict__ in,
                                          const __nv_bfloat16* __restrict__ w,
@@ -74,16 +79,16 @@ __global__ void rms_norm_baseline_kernel(const __nv_bfloat16* __restrict__ in,
                 o2[i] = __floats2bfloat162_rn(f.x * rnorm * fw.x,
                                               f.y * rnorm * fw.y);
             }
-            *reinterpret_cast<float4*>(
-                const_cast<__nv_bfloat16*>(out) + (size_t)row * K + k) =
+            *reinterpret_cast<float4*>(out + (size_t)row * K + k) =
                 *reinterpret_cast<float4*>(o2);
         }
         __syncthreads();
     }
 }
 
-// 融合 kernel:一个 block 负责一行,阶段 1 归约 sumsq 得 rnorm,
-// 阶段 2 逐组做 5.3(b) 的量化(不写 bf16 中间结果)。
+// Fused kernel: one block per row; stage 1 reduces sumsq into rnorm,
+// stage 2 quantizes group by group exactly as the standalone quant kernel
+// (no bf16 intermediate written).
 template <int BLOCK>
 __global__ void fused_rms_nvfp4_kernel(const __nv_bfloat16* __restrict__ in,
                                        const __nv_bfloat16* __restrict__ w,
@@ -95,7 +100,8 @@ __global__ void fused_rms_nvfp4_kernel(const __nv_bfloat16* __restrict__ in,
     const __nv_bfloat16* xr = in + (size_t)row * K;
     __shared__ float red[BLOCK / 32];
 
-    // 阶段 1:sumsq(每线程 8 元素 float4 步进 + shuffle 树形归约)
+    // Stage 1: sumsq (8 elements per thread via float4 steps + shuffle tree
+    // reduction)
     float ss = 0.f;
     for (int k = threadIdx.x * 8; k < K; k += BLOCK * 8) {
         float4 raw = *reinterpret_cast<const float4*>(xr + k);
@@ -120,7 +126,8 @@ __global__ void fused_rms_nvfp4_kernel(const __nv_bfloat16* __restrict__ in,
     __syncthreads();
     float rnorm = 1.0f / sqrtf(red[0] / K + eps);
 
-    // 阶段 2:一线程一组地量化,与 5.3(b) 相同的顺序
+    // Stage 2: one thread per group, same order as the standalone quant
+    // kernel
     int numKTiles = nvfp4_num_ktiles(K);
     int groupsPerRow = K / NVFP4_GROUP;
     for (int g = threadIdx.x; g < groupsPerRow; g += BLOCK) {
@@ -141,9 +148,8 @@ __global__ void fused_rms_nvfp4_kernel(const __nv_bfloat16* __restrict__ in,
         uint8_t* dst = dataOut + ((size_t)row * K / 2 + g * (NVFP4_GROUP / 2));
 #pragma unroll
         for (int i = 0; i < NVFP4_GROUP; i += 2) {
-            __nv_fp4x2_e2m1 p =
-                __nv_fp4x2_e2m1(make_float2(vals[i] * inv, vals[i + 1] * inv));
-            dst[i / 2] = *reinterpret_cast<uint8_t*>(&p);
+            dst[i / 2] = (uint8_t)(e2m1_encode(vals[i] * inv) |
+                                   (e2m1_encode(vals[i + 1] * inv) << 4));
         }
     }
 }
@@ -151,15 +157,17 @@ __global__ void fused_rms_nvfp4_kernel(const __nv_bfloat16* __restrict__ in,
 static void launch_fused(const __nv_bfloat16* in, const __nv_bfloat16* w,
                          uint8_t* dataOut, uint8_t* sfOut, int M, int K,
                          float eps, int sms) {
-    // 一行一个 block;行数少时一个 block 也能盖住整行(K<=8192,
-    // 256 线程 x 8 元素 x 多轮),行数多时 block 数天然铺满。
+    // One block per row; for few rows a single block still covers a whole
+    // row (K<=8192, 256 threads x 8 elements x multiple passes); with many
+    // rows the block count fills the grid naturally.
     (void)sms;
     fused_rms_nvfp4_kernel<256><<<M, 256>>>(in, w, dataOut, sfOut, M, K, eps);
 }
 
-// 公平基线:两步各自单独调优。rms_norm 的 grid/block 在这里给的是
-// 经验起点,对比前应在真机上扫一遍 {256,512,1024} x {M, sms, 2sms, 4sms}
-// 取两步各自最优(报告要求:基线吃亏的对比没有意义)。
+// Fair baseline: each step tuned on its own. The rms_norm grid/block here
+// is an empirical starting point; before comparing, sweep
+// {256,512,1024} x {M, sms, 2sms, 4sms} on the real device and take each
+// step's best (a hobbled baseline proves nothing).
 static void launch_two_step(const __nv_bfloat16* in, const __nv_bfloat16* w,
                             __nv_bfloat16* mid, uint8_t* dataOut,
                             uint8_t* sfOut, int M, int K, float eps,
@@ -167,6 +175,26 @@ static void launch_two_step(const __nv_bfloat16* in, const __nv_bfloat16* w,
     int grid = M < sms * 4 ? M : sms * 4;
     rms_norm_baseline_kernel<512><<<grid, 512>>>(in, w, mid, M, K, eps);
     launch_nvfp4_quant(mid, dataOut, sfOut, M, K, sms);
+}
+
+// Host reference for the two-step baseline's first half: plain rms_norm * w,
+// so the baseline's intermediate is itself validated, not just the fused
+// kernel's output (a silently broken baseline would inflate the speedups).
+static void host_rms_ref(const std::vector<float>& x,
+                         const std::vector<float>& w, int M, int K, float eps,
+                         std::vector<__nv_bfloat16>& mid) {
+    mid.resize((size_t)M * K);
+    for (int r = 0; r < M; r++) {
+        double ss = 0;
+        for (int k = 0; k < K; k++) {
+            double v = x[(size_t)r * K + k];
+            ss += v * v;
+        }
+        float rnorm = 1.0f / sqrtf((float)(ss / K) + eps);
+        for (int k = 0; k < K; k++)
+            mid[(size_t)r * K + k] =
+                __float2bfloat16(x[(size_t)r * K + k] * rnorm * w[k]);
+    }
 }
 
 static void host_ref(const std::vector<float>& x, const std::vector<float>& w,
@@ -247,6 +275,26 @@ int main() {
         for (size_t i = 0; i < gd.size(); i++) bad += gd[i] != rd[i];
         bool pass = bad <= (long)(gd.size() / 10000) + 1;
         total_bad += !pass;
+
+        // validate the baseline's intermediate too (rms_norm half of
+        // two-step; the quant half is quantize.cu's job). bf16 rounding of
+        // the host fp32 result may differ from the kernel's fused
+        // multiply, so compare in float with a small tolerance.
+        launch_two_step(dx, dw, dmid, dd, dsf, M, K, eps, sms);
+        CUDA_CHECK_KERNEL();
+        std::vector<__nv_bfloat16> gmid(n), rmid;
+        CUDA_CHECK(cudaMemcpy(gmid.data(), dmid, n * 2, cudaMemcpyDeviceToHost));
+        host_rms_ref(hxf, hwf, M, K, eps, rmid);
+        long mbad = 0;
+        for (size_t i = 0; i < n; i++) {
+            float d = __bfloat162float(gmid[i]) - __bfloat162float(rmid[i]);
+            mbad += fabsf(d) > 1e-2f * (1.0f + fabsf(__bfloat162float(rmid[i])));
+        }
+        if (mbad) {
+            printf("  baseline rms_norm output invalid (%ld / %zu elements off); "
+                   "speedups below are against a broken baseline\n", mbad, n);
+            total_bad++;
+        }
 
         int iters = M >= 4096 ? 40 : 200;
         float t2 = time_avg_ms(

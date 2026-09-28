@@ -1,34 +1,40 @@
-// 问题 1.1:m16n8k32(e4m3)的 fragment 布局公式。
+// Derives and verifies the mma.m16n8k32 fragment layouts for e4m3: a
+// host-side truth table for every (lane, register, byte) of A and B,
+// checked against the PTX ISA mapping.
 //
-// 课上对 m16n8k16 fp16 推过 A 和 B 的公式。这次的形状是
-// mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32:A 是 16x32、
-// 每 lane 16 byte(4 个 b32 寄存器),B 是 32x8、每 lane 8 byte。
-// 对照 PTX ISA 的 "Matrix Fragments for mma.m16n8k32" 一节的 fragment
-// 图,写出下面四个函数。i 是 byte 在 fragment 里的序号(寄存器序
-// r = i/4,寄存器内 byte 序 j = i%4)。
+// Shape: mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32. A is 16x32
+// with 16 bytes per lane (4 b32 registers), B is 32x8 with 8 bytes per
+// lane. The four functions below give the (row, col) of byte i within
+// the fragment (register number r = i/4, byte-in-register j = i%4), per
+// the PTX ISA section "Matrix Fragments for mma.m16n8k32".
 //
-// 判测是纯 host 程序,真值表来自在真卡上验证过的实现(mma 在随机
-// 数据上与 CPU 对拍通过,则其中的映射必与硬件一致)。
-// 运行:make run/m1_sm80/01_fragment_map(无卡也可以判)
+// The check is pure host: the truth table (A_POS/B_POS below) comes from
+// an implementation validated on real hardware -- if an mma matches a
+// CPU reference on random data, the mapping inside it must agree with
+// the hardware. Runs without a GPU.
+// Run: make run/fragments/fragment_map
 //
-// 附加一问(写进报告):A 的同一个 b32 寄存器里 4 个 fp8 在矩阵里
-// 沿哪个维度相邻?这个方向对 1.4 用 ldmatrix 装载意味着什么?
+// Detail that matters downstream: within one b32 register of A the 4
+// fp8 values are adjacent along K -- exactly the 16-bit unit ldmatrix
+// moves, which is what lets ldmatrix/ldmatrix.cu load these fragments
+// directly.
 #include <cstdio>
 #include <cstdint>
 
-// m16n8k32 e4m3 的 fragment 映射(对照 PTX ISA "Matrix Fragments for
+// Fragment mapping for m16n8k32 e4m3 (see PTX ISA "Matrix Fragments for
 // mma.m16n8k32"):
-//   记 group = lane>>2(行方向的 8 个组),tig = lane&3(组内 4 线程),
-//   r = i/4 是第几个 b32 寄存器,j = i&3 是寄存器内第几个 byte。
+//   group = lane>>2 (one of the 8 row groups), tig = lane&3 (4 threads
+//   within a group), r = i/4 is which b32 register, j = i&3 which byte
+//   within it.
 //   A(16x32):
 //     r=0: row = group,       col = tig*4 + j
 //     r=1: row = group + 8,   col = tig*4 + j
 //     r=2: row = group,       col = tig*4 + 16 + j
 //     r=3: row = group + 8,   col = tig*4 + 16 + j
-//   B(32x8,col 布局,n 在列):
+//   B (32x8, col layout, n along the columns):
 //     r=0: k = tig*4 + j
 //     r=1: k = tig*4 + 16 + j
-//     n = group(两个寄存器相同)
+//     n = group (same for both registers)
 static int a_row_of(int lane, int i) {
     int group = lane >> 2, r = i / 4;
     return group + (r & 1) * 8;
@@ -46,7 +52,7 @@ static int b_col_of(int lane, int i) {  // n
     return lane >> 2;
 }
 
-// 以下为判测,不需要修改。表项 = row * 32 + col(A)/ k * 8 + n(B)。
+// Truth tables and check below. Entry = row * 32 + col (A) / k * 8 + n (B).
 static const short A_POS[32 * 16] = {
       0,   1,   2,   3, 256, 257, 258, 259,  16,  17,  18,  19,
     272, 273, 274, 275,   4,   5,   6,   7, 260, 261, 262, 263,

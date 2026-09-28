@@ -1,9 +1,11 @@
-// 问题 3.2：divergence
-// 两个 kernel 的每个线程做同样多的计算，区别只在分支怎么划分线程。
-// 先在 handout 上写下你的预测，再运行对比。
+// Warp divergence, measured. Both kernels do identical work per thread; the
+// only difference is how the branch splits threads. Branching on tid % 2 splits
+// every warp half-and-half, so both paths execute serially; branching on
+// (tid / 32) % 2 keeps each warp entirely on one path. main() times both and
+// prints the slowdown ratio.
 #include "common.h"
 
-// 按奇偶分支：同一个 warp 里两种线程各占一半。
+// Branch on odd/even: every warp is split half and half.
 __global__ void diverge_in_warp(float *out, int iters) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     float x = tid * 0.5f;
@@ -15,7 +17,7 @@ __global__ void diverge_in_warp(float *out, int iters) {
     out[tid] = x;
 }
 
-// 按 warp 分支：一个 warp 内所有线程走同一条路。
+// Branch by warp: every thread in a warp takes the same path.
 __global__ void diverge_by_warp(float *out, int iters) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     float x = tid * 0.5f;
@@ -33,7 +35,7 @@ int main() {
     float *d_out;
     CUDA_CHECK(cudaMalloc(&d_out, (size_t)n * sizeof(float)));
 
-    // 各热身一次。
+    // Warm up both once.
     diverge_in_warp<<<blocks, threads>>>(d_out, iters);
     diverge_by_warp<<<blocks, threads>>>(d_out, iters);
     CUDA_CHECK_KERNEL();
@@ -49,8 +51,8 @@ int main() {
     float ms_by = timer.stop_ms();
 
     CUDA_CHECK_KERNEL();
-    printf("warp 内分支 (tid %% 2)    : %8.3f ms\n", ms_in);
-    printf("按 warp 分支 (tid/32 %% 2): %8.3f ms\n", ms_by);
-    printf("比值: %.2f\n", ms_in / ms_by);
+    printf("diverge in warp (tid %% 2)   : %8.3f ms\n", ms_in);
+    printf("diverge by warp (tid/32 %% 2): %8.3f ms\n", ms_by);
+    printf("ratio: %.2f\n", ms_in / ms_by);
     return 0;
 }

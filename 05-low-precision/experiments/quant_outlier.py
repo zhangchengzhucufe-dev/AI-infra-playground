@@ -1,12 +1,14 @@
-"""问题 5.1:per-tensor scale 与 outlier。
+"""Outlier poisoning study: one 3000-magnitude outlier in a tensor
+quantized with a single global scale.
 
-构造一个张量:一万个元素均匀分布在 [-1, 1],外加一个 3000 的
-outlier。按 per-tensor 方式量化到 E4M3(scale = amax / 448,cast 用
-torch.float8_e4m3fn),反量化后测逐点相对误差,填题面的表并回答三问。
+Ten thousand elements uniform on [-1, 1] plus one outlier of 3000,
+quantized per-tensor to E4M3 (scale = amax / 448, cast via
+torch.float8_e4m3fn), dequantized, then pointwise relative error. Three
+comparisons: with vs without the outlier, the threshold below which
+values quantize to zero, and how much per-block (1x128) scaling buys
+back.
 
-需要动手的是下面两个 TODO;跑法:
-    uv run python kernels/quant_outlier.py
-输出直接用于报告,没有自动判测。
+Run: python kernels/quant_outlier.py
 """
 
 import torch
@@ -21,7 +23,7 @@ def build_tensor(n: int = 10000, outlier: float = 3000.0) -> torch.Tensor:
 
 
 def quant_dequant_per_tensor(x: torch.Tensor) -> torch.Tensor:
-    """per-tensor E4M3 量化再反量化。"""
+    """Per-tensor E4M3 quantize, then dequantize."""
     amax = x.abs().max()
     scale = amax / E4M3_MAX
     q = (x / scale).to(torch.float8_e4m3fn)
@@ -29,7 +31,7 @@ def quant_dequant_per_tensor(x: torch.Tensor) -> torch.Tensor:
 
 
 def rel_err_at(x: torch.Tensor, y: torch.Tensor, value: float) -> float:
-    """取 x 中最接近 value 的元素,返回该点的相对误差。"""
+    """Find the element of x closest to value, return its relative error."""
     i = (x - value).abs().argmin()
     return ((y[i] - x[i]) / x[i]).abs().item()
 
@@ -37,31 +39,32 @@ def rel_err_at(x: torch.Tensor, y: torch.Tensor, value: float) -> float:
 def main() -> None:
     x = build_tensor()
     y = quant_dequant_per_tensor(x)
-    print("含 outlier:")
+    print("with outlier:")
     for v in (0.5, 0.1, 0.01, 0.005, 3000.0):
-        print(f"  x≈{v:<8} rel_err={rel_err_at(x, y, v):.3e}")
+        print(f"  x~{v:<8} rel_err={rel_err_at(x, y, v):.3e}")
 
-    # (a) 去掉 outlier 重新量化,对比 0.5 处的误差
+    # Re-quantize without the outlier, compare the error at 0.5
     x_no = build_tensor()[:-1]
     y_no = quant_dequant_per_tensor(x_no)
     e_with = rel_err_at(x, y, 0.5)
     e_without = rel_err_at(x_no, y_no, 0.5)
-    print(f"\n(a) 0.5 处误差: 含 outlier {e_with:.3e}, "
-          f"不含 {e_without:.3e}, 变化 {e_with / e_without:.1f} 倍")
+    print(f"\n(a) rel err at 0.5: with outlier {e_with:.3e}, "
+          f"without {e_without:.3e}, {e_with / e_without:.1f}x change")
 
-    # (b) 被量化成 0 的阈值:E4M3 的最小正规数是 2^-6,数值 / scale 不足
-    #     最小表示的一半会舍入到 0。
+    # Threshold for quantizing to zero: E4M3's smallest nonzero magnitude
+    #     is the subnormal 2^-9, so values / scale below half of that step
+    #     (2^-10) round to 0.
     scale = x.abs().max() / E4M3_MAX
     small = torch.tensor([1e-3, 2e-3, 3e-3, 5e-3, 8e-3, 1e-2])
     for v in small:
         q = (v / scale).to(torch.float8_e4m3fn)
-        print(f"  (b) x={v:.4f} -> 量化值 {q.float().item() * scale.item():.3e}"
-              f" ({'0' if q.float().item() == 0 else '非零'})")
+        print(f"  (b) x={v:.4f} -> quantized {q.float().item() * scale.item():.3e}"
+              f" ({'zero' if q.float().item() == 0 else 'nonzero'})")
 
-    # (c) 1x128 per-block scale:含 outlier 的 block scale 被 3000 抬高,
-    #     其余 block 不受影响。
-    xu = x[:-1]                    # 一万个均匀元素
-    base = xu[: (len(xu) // 128) * 128]  # 截成 128 的整数倍,78 个 block
+    # 1x128 per-block scale: the 3000 pushes up the scale of the block
+    #     holding it; every other block is unaffected.
+    xu = x[:-1]                    # the ten thousand uniform elements
+    base = xu[: (len(xu) // 128) * 128]  # trim to a multiple of 128, 78 blocks
     blocks = base.view(-1, 128)
     s = blocks.abs().amax(dim=1, keepdim=True) / E4M3_MAX
     qb = (blocks / s).to(torch.float8_e4m3fn).float() * s
@@ -69,18 +72,18 @@ def main() -> None:
         i = int((base - v).abs().argmin())
         b = i // 128
         err_blk = ((qb[b, i % 128] - base[i]) / base[i]).abs().item()
-        print(f"  (c) 无 outlier 的 block, x≈{v}: "
-              f"per-tensor 误差 {rel_err_at(x, y, v):.3e}, "
-              f"per-block 误差 {err_blk:.3e}")
-    # 含 outlier 的 block:把 3000 塞进一个 128 元素的 block 再量化,
-    # 它的同 block 邻居退化成 per-tensor 的水平。
+        print(f"  (c) block without outlier, x~{v}: "
+              f"per-tensor {rel_err_at(x, y, v):.3e}, "
+              f"per-block {err_blk:.3e}")
+    # block with the outlier: stuff 3000 into one 128-element block and
+    # quantize; its block-mates fall back to per-tensor accuracy.
     blk = torch.cat([torch.tensor([3000.0]), xu[:127]])
     s2 = blk.abs().max() / E4M3_MAX
     q2 = (blk / s2).to(torch.float8_e4m3fn).float() * s2
     for off in (1, 60):
         err2 = ((q2[off] - blk[off]) / blk[off]).abs().item()
-        print(f"  (c) 含 outlier 的 block, x≈{blk[off].item():.3f}: "
-              f"误差 {err2:.3e}")
+        print(f"  (c) block with outlier, x~{blk[off].item():.3f}: "
+              f"err {err2:.3e}")
 
 
 if __name__ == "__main__":

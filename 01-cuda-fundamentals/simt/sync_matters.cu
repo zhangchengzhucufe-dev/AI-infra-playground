@@ -1,9 +1,8 @@
-// 问题 3.3：__syncthreads 实验。
-// 每个 block 把自己的 256 个元素倒序：先搬进 shared memory，同步，
-// 再交叉着读出来。任务：
-//   1. 直接运行，确认 PASS；
-//   2. 注释掉 __syncthreads() 那一行，再运行几次，观察结果；
-//   3. 回答 handout 里的问题。
+// Why __syncthreads() matters. Each block reverses its own 256 elements:
+// stage into shared memory, sync, read back out crossed. Comment out the
+// marked __syncthreads() line and the program races: threads can read buf
+// before other threads' writes land, so results come out wrong -- or
+// nondeterministically right. As-is, expected output PASS.
 #include "common.h"
 
 #define BLOCK 256
@@ -14,7 +13,7 @@ __global__ void reverse_blocks(const float *in, float *out, int n) {
     int t = threadIdx.x;
 
     buf[t] = in[base + t];
-    __syncthreads();  // <-- 实验对象
+    __syncthreads();  // <-- comment this out to see the race
     out[base + t] = buf[BLOCK - 1 - t];
 }
 

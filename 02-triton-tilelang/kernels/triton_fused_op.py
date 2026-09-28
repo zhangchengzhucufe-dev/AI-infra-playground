@@ -1,10 +1,10 @@
-"""问题 7.2：fused elementwise（改造题）。
+"""Fused elementwise kernel: z = relu(a * x + b).
 
-scale_kernel 目前功能完整，相应代码不要变动。
-fused_kernel 目前和 scale_kernel 完全一致，是你需要修改的 kernel。
-任务：改成 z = relu(a * x + b)，其中 a、b 是标量。
-TIP: 只需要动计算那一行，再把 a、b 传进 kernel——主体不变，
-这正是 Tile 视角的好处:-)。改完运行：
+scale_kernel is the reference: identical skeleton (program id, offsets, mask,
+masked load/store), only the compute line and the parameter list differ.
+That's the payoff of the tile view -- swapping the elementwise formula means
+swapping one expression, not rewriting the data movement.
+
     pytest tests/test_fused_op.py
 """
 
@@ -32,7 +32,7 @@ def scale(x: torch.Tensor) -> torch.Tensor:
     return z
 
 
-# ====== 从这里开始改 ======
+# same skeleton as scale_kernel; only the compute line and parameters change
 
 @triton.jit
 def fused_kernel(x_ptr, z_ptr, n, a, b, BLOCK_SIZE: tl.constexpr):

@@ -1,12 +1,12 @@
-// 问题 4.3：把系数表搬进 constant memory（ MODIFY ）。
-// 下面的 poly_eval_global 把 8 个多项式系数放在 global memory，每个线程读 8 次。
-// 它保留不动，作为对比基准。
-// 任务：
-//   1. 声明 __constant__ float COEF[8]；
-//   2. 在 main 里标了 TODO 的地方用 cudaMemcpyToSymbol 把系数拷进去；
-//   3. 把 poly_eval_const 写成读 COEF 的版本——参数表保持不变（判测代码要用
-//      同一个函数指针类型跑两版），里面不再用 coef 这个指针即可。
-// 两版都要 PASS。评测结果会包含两版的耗时和比值。
+// Polynomial evaluation with the 8 coefficients in constant memory vs global
+// memory. poly_eval_global keeps the coefficients behind a global-memory
+// pointer -- 8 VRAM reads per thread -- and stands as the baseline;
+// poly_eval_const reads the same values from a __constant__ array backed by
+// the dedicated constant cache. Both kernels share one signature so main()
+// can run both through a single function pointer type. Horner's scheme,
+// highest degree first.
+// main() judges and times both; expected output PASS per kernel plus the
+// global/constant ratio.
 #include "common.h"
 
 __global__ void poly_eval_global(const float *x, float *y, const float *coef,
@@ -15,7 +15,7 @@ __global__ void poly_eval_global(const float *x, float *y, const float *coef,
     if (i < n) {
         float xi = x[i];
         float acc = 0.f;
-        // 秦九韶（Horner）算法，从最高次往下算。
+        // Horner's scheme, highest degree first.
         for (int k = 7; k >= 0; k--) acc = acc * xi + coef[k];
         y[i] = acc;
     }
@@ -25,8 +25,9 @@ __constant__ float COEF[8];
 
 __global__ void poly_eval_const(const float *x, float *y, const float *coef,
                                 int n) {
-    // 参数 coef 不再使用：8 个系数全部走 constant cache（参数表不能改，
-    // 判测要用同一个函数指针类型跑两版）。
+    // Parameter coef is deliberately unused here: the 8 coefficients come from
+    // the constant cache. The signature must stay identical to the global
+    // version so one function pointer type runs both.
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
         float xi = x[i];
@@ -36,7 +37,7 @@ __global__ void poly_eval_const(const float *x, float *y, const float *coef,
     }
 }
 
-// ---------------- 以下是判测与计时，不要修改 ----------------
+// ---------------- Judge and timing harness ----------------
 
 typedef void (*poly_fn)(const float *, float *, const float *, int);
 
@@ -50,7 +51,7 @@ static float run_one(poly_fn fn, const char *name, const float *d_x, float *d_y,
                           cudaMemcpyDeviceToHost));
     if (!check_close(h_y, h_ref, n, 1e-3f)) {
         printf("%s: FAIL\n", name);
-        emit_result("4.3", "fail", "{}");
+        emit_result("constant-coeff", "fail", "{}");
         exit(1);
     }
 
@@ -60,7 +61,7 @@ static float run_one(poly_fn fn, const char *name, const float *d_x, float *d_y,
     for (int r = 0; r < reps; r++) fn<<<blocks, threads>>>(d_x, d_y, d_coef, n);
     float ms = timer.stop_ms() / reps;
     CUDA_CHECK_KERNEL();
-    printf("%s: PASS  平均 %.4f ms\n", name, ms);
+    printf("%s: PASS  avg %.4f ms\n", name, ms);
     return ms;
 }
 
@@ -73,7 +74,7 @@ int main() {
     float *h_y = (float *)malloc(bytes);
     float *h_ref = (float *)malloc(bytes);
     fill_random(h_x, n, 5);
-    for (int i = 0; i < n; i++) h_x[i] = h_x[i] * 0.1f;  // 压到 [0,1) 附近防溢出
+    for (int i = 0; i < n; i++) h_x[i] = h_x[i] * 0.1f;  // keep x near [0,1) so the degree-7 polynomial cannot overflow
     for (int i = 0; i < n; i++) {
         float acc = 0.f;
         for (int k = 7; k >= 0; k--) acc = acc * h_x[i] + h_coef[k];
@@ -87,7 +88,7 @@ int main() {
     CUDA_CHECK(cudaMemcpy(d_x, h_x, bytes, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_coef, h_coef, sizeof(h_coef), cudaMemcpyHostToDevice));
 
-    // TODO：把 h_coef 拷进你声明的 __constant__ 数组（cudaMemcpyToSymbol）。
+    // Upload the coefficient table into the __constant__ array.
     CUDA_CHECK(cudaMemcpyToSymbol(COEF, h_coef, sizeof(h_coef)));
 
     int threads = 256;
@@ -97,13 +98,14 @@ int main() {
                          h_ref, n, blocks, threads);
     float ms_c = run_one(poly_eval_const, "constant", d_x, d_y, d_coef, h_y,
                          h_ref, n, blocks, threads);
-    // 这道题不预期提速，比值接近 1.00x 是正常结果，所以不设退化提示。
+    // No speedup expected here -- a ratio near 1.00x is the normal outcome,
+    // so no degradation hint is configured (warn_below = 0).
     float ratio = report_speedup("global / constant", ms_g, ms_c, 0.f, NULL);
 
     char metrics[192];
     snprintf(metrics, sizeof(metrics),
              "{\"global_ms\":%.4f,\"const_ms\":%.4f,\"speedup\":%.3f}", ms_g,
              ms_c, ratio);
-    emit_result("4.3", "pass", metrics);
+    emit_result("constant-coeff", "pass", metrics);
     return 0;
 }

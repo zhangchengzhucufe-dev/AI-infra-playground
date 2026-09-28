@@ -1,29 +1,36 @@
-// 问题 2.3:三种 swizzle 模式的地址映射。
+// Address mapping of the three smem swizzle modes.
 //
-// 输入:元素的逻辑坐标(atom 内行号 row、行内字节偏移 colByte),
-// 输出:atom 内的物理字节偏移。三种模式的 atom 尺寸:
-//   128B swizzle:8 行 x 128B;64B:8 行(取 4 行一周期)x 64B;
-//   32B:8 行(2 行一周期)x 32B。
-// 课上 S064 推的是 128B 的地址位异或;64B/32B 的参与位段自己从
-// PTX ISA 的 swizzling 一节推。16B 以内的低位永远直通。
+// Input: an element's logical coordinates (row within the atom, byte
+// offset within the row); output: the physical byte offset within the
+// atom. Atom sizes per mode:
+//   128B swizzle: 8 rows x 128B; 64B: 8 rows (4 rows per period) x 64B;
+//   32B: 8 rows (2 rows per period) x 32B.
+// All three are the same address-bit XOR, per the swizzling section of
+// the PTX ISA: the 16B-chunk index XORs with the low bits of the row
+// within one period. Low bits below 16B always pass through unchanged.
 //
-// 判测(纯 host,无卡):
-//   1) 双射:atom 内所有 (row, colByte) 的输出恰好铺满 atom 且无碰撞;
-//   2) 列访问无冲突:固定逻辑 16B chunk 下标 j,遍历一个周期内的行,
-//      物理 chunk 必须两两不同(descriptor 路径按列取数的要求;
-//      单纯 padding 或恒等映射会在这里现形)。
-// 运行:make run/m2_smem/03_swizzle
+// Two host-side checks (no GPU):
+//   1) Bijection: the outputs of all (row, colByte) in an atom must
+//      tile the atom exactly, with no collisions;
+//   2) Conflict-free column access: fix a logical 16B chunk index j,
+//      sweep the rows within one period, and the physical chunks must
+//      all differ (this is what the descriptor path needs to read by
+//      column; plain padding or an identity mapping fails right here).
+// Run: make run/smem/swizzle
 //
-// 你的 swizzle_128B 会在 3.2 里直接用于 smem staging——那里是真硬件
-// 判测:布局错,GEMM 结果必错。
+// swizzle_128B is the same layout TMA's SWIZZLE_128B mode produces when
+// landing tiles in smem, so anything built against the descriptor.cu
+// scenarios agrees with hardware staging: wrong layout means wrong GEMM.
 #include <cstdio>
 #include <cstring>
 
-// 通用模式:行内 16B chunk 的下标与行号的低位做 XOR,参与异或的位数
-// 取决于行宽——128B 行有 8 个 chunk(3 bit)↔ row 低 3 bit;64B 行有
-// 4 个 chunk(2 bit)↔ row 低 2 bit;32B 行 2 个 chunk(1 bit)↔ row 低
-// 1 bit。16B 以内的低位不动。这正好保证:固定逻辑 chunk、扫一个周期
-// 的行,物理 chunk 两两不同(列访问无 bank conflict)。
+// General pattern: the row's 16B chunk index is XORed with low bits of
+// the row number; how many bits take part depends on the row width --
+// a 128B row has 8 chunks (3 bits) <-> low 3 bits of row; a 64B row
+// has 4 chunks (2 bits) <-> low 2 bits; a 32B row has 2 chunks (1 bit)
+// <-> low 1 bit. Bits below 16B are untouched. This is exactly what
+// guarantees: fix a logical chunk, sweep the rows of one period, and
+// the physical chunks all differ (conflict-free column access).
 static int swizzle_128B(int row, int colByte) {
     return row * 128 + (colByte ^ ((row & 7) << 4));
 }
@@ -34,7 +41,7 @@ static int swizzle_32B(int row, int colByte) {
     return row * 32 + (colByte ^ ((row & 1) << 4));
 }
 
-// 以下为判测,不需要修改。
+// Checks below.
 static int check_mode(const char* name, int (*fn)(int, int), int rowBytes,
                       int period) {
     const int rows = 8;
@@ -42,7 +49,8 @@ static int check_mode(const char* name, int (*fn)(int, int), int rowBytes,
     static char hit[8 * 128];
     memset(hit, 0, atom);
     int bad = 0;
-    // 约定:输出是 atom 内偏移,行基址 row*rowBytes 由映射自己含入。
+    // Convention: the output is an offset within the atom; the row base
+    // row*rowBytes is included by the mapping itself.
     for (int r = 0; r < rows; r++)
         for (int c = 0; c < rowBytes; c++) {
             int off = fn(r, c);
@@ -50,10 +58,12 @@ static int check_mode(const char* name, int (*fn)(int, int), int rowBytes,
             else hit[off] = 1;
         }
     if (bad) {
-        printf("%s FAIL:双射检查,%d 处越界或碰撞\n", name, bad);
+        printf("%s FAIL: bijection check, %d out-of-range or collided entries\n",
+               name, bad);
         return 1;
     }
-    // 列访问:固定 16B chunk j,一个周期内的行的物理 chunk 应两两不同
+    // Column access: fix 16B chunk j; the rows within one period must
+    // map to distinct physical chunks
     int chunks = rowBytes / 16;
     for (int j = 0; j < chunks; j++) {
         unsigned seen = 0;
@@ -61,8 +71,8 @@ static int check_mode(const char* name, int (*fn)(int, int), int rowBytes,
             int off = fn(r, j * 16);
             int physChunk = (off % rowBytes) / 16;
             if (seen & (1u << physChunk)) {
-                printf("%s FAIL:列 %d 在行 0..%d 内物理 chunk 重复\n", name,
-                       j, period - 1);
+                printf("%s FAIL: column %d repeats a physical chunk across rows 0..%d\n",
+                       name, j, period - 1);
                 return 1;
             }
             seen |= 1u << physChunk;

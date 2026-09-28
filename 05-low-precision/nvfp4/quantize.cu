@@ -1,9 +1,14 @@
-// 问题 5.3(b) 的判测与计时程序,不需要修改。实现写在
-// nvfp4_quant_kernel.h。先过 03a,再做这题(host 参考用你的编码器)。
+// End-to-end NVFP4 quantization: correctness check against a host
+// reference, then bandwidth. The kernel (nvfp4_quant_kernel.h) puts one
+// thread on each 16-element group: group amax -> e4m3 scale -> swizzled
+// scale layout -> e2m1_encode.h packing; the host reference runs the same
+// chain, so device and host agree by construction on the encoder and the
+// check pins the scale math and the layouts.
 //
-// 判测口径:quant 的每一步在 host 和 device 上是同样的 float 运算和
-// 同样的顺序,结果逐 byte 严格相等,没有 tolerance。
-// 计时输出有效带宽:读 2 B/elem,写 0.5 B/elem 数据 + 1/16 B/elem SF。
+// Correctness: every step of the quant runs the same float math in the same
+// order on host and device, so results must be byte-exact, no tolerance.
+// Timing prints effective bandwidth: read 2 B/elem, write 0.5 B/elem data
+// + 1/16 B/elem scale factors.
 #include <vector>
 #include <random>
 #include "../common.h"

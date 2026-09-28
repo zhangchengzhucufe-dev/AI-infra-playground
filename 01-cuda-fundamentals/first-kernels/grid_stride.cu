@@ -1,14 +1,15 @@
-// 问题 2.7：grid-stride loop（改造题）。
-// 现状：launch 只给了 64 个 block，线程总数远小于 n，所以输出 FAIL。
-// 任务：不许改 launch 配置，把 kernel 改成 grid-stride loop——每个线程
-//      跨过整个 grid 的步长处理多个元素——让任意 n 都能 PASS。
-// 参考：NVIDIA 博客 "CUDA Pro Tip: Write Flexible Kernels with Grid-Stride Loops"
+// Grid-stride loop: the launch is a fixed 64 blocks x 256 threads (16384
+// threads) while n = 16M, yet every element is covered -- each thread starts
+// at its global id and steps by the grid-wide thread count. This works for any
+// n and any launch size, which is why production kernels prefer it over
+// exact-fit grids.
+// Ref: NVIDIA blog "CUDA Pro Tip: Write Flexible Kernels with Grid-Stride Loops"
 //      https://developer.nvidia.com/blog/cuda-pro-tip-write-flexible-kernels-grid-stride-loops/
 #include "common.h"
 
 __global__ void vectorAdd(const float *a, const float *b, float *c, int n) {
-    // grid-stride loop：起点是本线程的全局编号，步长是整个 grid 的线程总数。
-    // 这样不管 n 多大、launch 给多少线程，每个元素都有线程负责。
+    // Grid-stride loop: start at this thread's global id, step by the total
+    // thread count of the grid. Any n, any launch size: every element is covered.
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     int stride = blockDim.x * gridDim.x;
     for (int i = idx; i < n; i += stride) {
@@ -17,7 +18,7 @@ __global__ void vectorAdd(const float *a, const float *b, float *c, int n) {
 }
 
 int main() {
-    const int n = 1 << 24;  // 16M 元素，远多于 64 * 256 = 16384 个线程
+    const int n = 1 << 24;  // 16M elements, far more than 64 * 256 = 16384 threads
     size_t bytes = (size_t)n * sizeof(float);
 
     float *h_a = (float *)malloc(bytes);
@@ -36,7 +37,7 @@ int main() {
     CUDA_CHECK(cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemset(d_c, 0, bytes));
 
-    vectorAdd<<<64, 256>>>(d_a, d_b, d_c, n);  // launch 配置不许动
+    vectorAdd<<<64, 256>>>(d_a, d_b, d_c, n);  // deliberately tiny launch: 16384 threads for 16M elements
     CUDA_CHECK_KERNEL();
 
     CUDA_CHECK(cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost));

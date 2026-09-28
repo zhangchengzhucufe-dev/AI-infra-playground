@@ -1,20 +1,20 @@
-// 问题 2.1：向量加法（填空）
-// 六个空各考一个概念，填完编译运行，"PASS"即可。
-// 填完之前这个文件无法通过编译。
+// Vector addition, the canonical first CUDA kernel: one thread per element,
+// 256-thread blocks, grid sized by rounding up, bounds check against n.
+// main() judges the result against a CPU reference; expected output PASS.
 #include "common.h"
 
-// ====== 空 1：kernel 需要什么函数修饰符？ ======
+// __global__ marks the function as a kernel: host code calls it with <<<...>>>.
 __global__ void vectorAdd(const float *a, const float *b, float *c, int n) {
-    // ====== 空 2：这个线程负责的全局下标 ======
+    // Global element index this thread owns.
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    // ====== 空 3：边界保护——总线程数可能多于元素个数 ======
+    // Bounds check: the round-up grid launches more threads than elements.
     if (idx < n) {
         c[idx] = a[idx] + b[idx];
     }
 }
 
 int main() {
-    const int n = 1000003;  // 故意取一个不是 256 整数倍的数
+    const int n = 1000003;  // deliberately not a multiple of 256
     size_t bytes = (size_t)n * sizeof(float);
 
     float *h_a = (float *)malloc(bytes);
@@ -30,15 +30,15 @@ int main() {
     CUDA_CHECK(cudaMalloc(&d_b, bytes));
     CUDA_CHECK(cudaMalloc(&d_c, bytes));
 
-    // ====== 空 4：把 h_a、h_b 拷到 device（注意最后一个方向参数） ======
+    // Host -> device copies; the direction argument is the last one.
     CUDA_CHECK(cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice));
 
     int threadsPerBlock = 256;
-    // ====== 空 5：block 数——向上取整，保证覆盖全部 n 个元素 ======
+    // Round up so the grid covers all n elements.
     int blocksPerGrid = (n + threadsPerBlock - 1) / threadsPerBlock;
 
-    // ====== 空 6：启动 kernel（执行配置写在哪里？） ======
+    // Launch: the execution configuration goes inside <<<blocks, threads>>>.
     vectorAdd<<<blocksPerGrid, threadsPerBlock>>>(d_a, d_b, d_c, n);
     CUDA_CHECK_KERNEL();
 

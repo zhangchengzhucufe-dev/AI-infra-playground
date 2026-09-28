@@ -1,5 +1,7 @@
-// 问题 0.1：第一个 CUDA 程序（模块 8 的编译实验也用它）。
-// 编译运行：make run/m0_env/01_hello
+// Minimal first CUDA program: hello<<<4, 8>>> prints its block and thread
+// coordinates from inside the kernel. Also the guinea pig for the PTX/SASS
+// compile experiments (see the Makefile header).
+// Build & run: make bin/basics/hello
 #include "common.h"
 
 __global__ void hello() {

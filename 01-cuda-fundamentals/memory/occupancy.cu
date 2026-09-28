@@ -1,19 +1,19 @@
-// 问题 4.8：occupancy 实验。
-// 思路：shared memory 按 block 分配，一个 block 占得越多，SM 上能同时
-// 驻留的 block 就越少，常驻 warp 数（occupancy）随之下降。下面的 kernel
-// 声明了不实际用于储值的动态 shared memory——计算量和访存量完全不变，
-// 变的只有 SM 上的并行度。
-// 程序对每一档 shared memory 用量做两件事：
-//   1. 用 cudaOccupancyMaxActiveBlocksPerMultiprocessor 查询这一档下
-//      每个 SM 理论上能驻留几个 block，换算成 occupancy；
-//   2. 实测同一个逐元素加法 kernel 的有效带宽。
-// 记录实测数据，并回答相关问题
+// Occupancy vs bandwidth, measured. Shared memory is allocated per block, so
+// the more a block takes, the fewer blocks fit on one SM and the fewer warps
+// stay resident. stream_add declares dynamic shared memory it never uses for
+// data: compute and memory traffic are identical in every row of the table;
+// only the SM's parallelism changes. For each allocation level the program
+//   1. queries cudaOccupancyMaxActiveBlocksPerMultiprocessor for the
+//      theoretical resident blocks per SM and converts that to occupancy, and
+//   2. times the effective bandwidth of the same elementwise add.
+// Prints the table, then the block size suggested by
+// cudaOccupancyMaxPotentialBlockSize.
 #include "common.h"
 
 #define BLOCK 256
 
 __global__ void stream_add(const float *a, const float *b, float *c, int n) {
-    extern __shared__ float ballast[];  // 只占 shared memory，不使用
+    extern __shared__ float ballast[];  // occupies shared memory only, never read or written
     (void)ballast;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) c[i] = a[i] + b[i];
@@ -25,10 +25,10 @@ int main() {
     int smem_sm = (int)prop.sharedMemPerMultiprocessor;
     int smem_blk_max = (int)prop.sharedMemPerBlockOptin;
     int max_threads = prop.maxThreadsPerMultiProcessor;
-    printf("%s：shared memory %d KB / SM，最大常驻 %d 线程 / SM\n\n",
+    printf("%s: %d KB shared memory / SM, max %d resident threads / SM\n\n",
            prop.name, smem_sm / 1024, max_threads);
 
-    // 允许单个 block 申请超过默认上限（48 KB）的动态 shared memory
+    // Opt in above the default 48 KB dynamic shared memory per block.
     CUDA_CHECK(cudaFuncSetAttribute((const void *)stream_add,
         cudaFuncAttributeMaxDynamicSharedMemorySize, smem_blk_max));
 
@@ -42,13 +42,14 @@ int main() {
     CUDA_CHECK(cudaMemset(d_b, 0, bytes));
     int nblocks = (n + BLOCK - 1) / BLOCK;
 
-    // shared memory 档位：按每 SM 总量的比例给定。一个 block 占了总量的
-    // 1/x，每 SM 大致就只能驻留 x 个 block。下面六档挑得能在多数卡上落到
-    // 六个不同的驻留块数，但实际落点还受架构影响（有的架构给每个 block
-    // 额外保留一小块 shared），一切以 API 报出来的数为准。
+    // Shared-memory levels, as fractions of the per-SM total: a block that
+    // takes 1/x of it leaves room for roughly x blocks per SM. On this card
+    // the six fractions land on four distinct resident-block counts (6, 5,
+    // 3, 1 -- the middle two fractions both give 6); the exact levels are
+    // architecture-dependent -- the API's numbers are authoritative.
     const double fracs[] = {0.0, 0.132, 0.15, 0.18, 0.29, 0.55};
     printf("%-14s %-16s %-11s %s\n",
-           "shared/block", "理论 block/SM", "occupancy", "实测带宽");
+           "shared/block", "blocks/SM (theo)", "occupancy", "measured BW");
     for (int k = 0; k < 6; k++) {
         int smem = (int)(smem_sm * fracs[k]);
         if (smem > smem_blk_max) smem = smem_blk_max;
@@ -58,7 +59,7 @@ int main() {
             &active, stream_add, BLOCK, smem));
         double occ = 100.0 * active * BLOCK / max_threads;
 
-        stream_add<<<nblocks, BLOCK, smem>>>(d_a, d_b, d_c, n);  // 热身
+        stream_add<<<nblocks, BLOCK, smem>>>(d_a, d_b, d_c, n);  // warm-up
         CUDA_CHECK_KERNEL();
         const int reps = 20;
         GpuTimer timer;
@@ -73,11 +74,12 @@ int main() {
                smem / 1024.0, active, occ, gbps);
     }
 
-    // 讲义里提到的另一个 API：让 runtime 建议一个 occupancy 最高的 block size
+    // Second occupancy API: let the runtime suggest a block size that
+    // maximizes occupancy.
     int min_grid = 0, best_block = 0;
     CUDA_CHECK(cudaOccupancyMaxPotentialBlockSize(
         &min_grid, &best_block, stream_add, 0, 0));
-    printf("\ncudaOccupancyMaxPotentialBlockSize 建议（smem = 0 时）：blockSize = %d\n",
+    printf("\ncudaOccupancyMaxPotentialBlockSize suggestion (smem = 0): blockSize = %d\n",
            best_block);
 
     CUDA_CHECK(cudaFree(d_a));

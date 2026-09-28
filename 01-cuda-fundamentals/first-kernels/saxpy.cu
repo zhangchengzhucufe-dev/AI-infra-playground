@@ -1,17 +1,19 @@
-// 问题 2.9（压轴，FROM-SCRATCH）：SAXPY
-// y = 2.0 * x + y，单精度。用法：./saxpy <n>
-// 数据按固定公式生成：
+// SAXPY: y = 2.0 * x + y in single precision. Usage: ./saxpy <n>
+// Inputs come from a fixed formula (no file I/O, easy to verify independently):
 //   x[i] = ((i % 2048) - 1024) * 0.5f
 //   y[i] = (i % 1024) - 512
-// 算完把 y 拷回 host，用 double 累加输出一行 SUM=<总和>，exit code 0。
-// n = 0 时输出 SUM=0（0 个 block 的 launch 是非法的，直接特判跳过）。
-// 本题不许 include common.h：错误检查宏和 cudaEvent 计时都自己写。
+// After computing, y is copied back to the host, accumulated in double, and
+// one line SUM=<total> is printed; exit code 0.
+// For n = 0 print SUM=0 (a 0-block launch is illegal, so special-case it).
+// Deliberately self-contained: the error-check macros and cudaEvent timing
+// are written out here instead of included from common.h. Verified by
+// judge_saxpy.sh, which rebuilds this file and checks SUM for 7 values of n.
 
 #include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>
 
-// 包住每个 CUDA API 调用，出错立刻报出文件、行号和原因。
+// Wrap every CUDA API call; on error, report file, line, and cause immediately.
 #define CUDA_CHECK(call)                                          \
     do {                                                          \
         cudaError_t err_ = (call);                                \
@@ -23,7 +25,7 @@
         }                                                         \
     } while (0)
 
-// kernel 启动本身没有返回值，要靠这两句查它的错误。
+// Kernel launch returns no error code; these two lines are how you catch launch errors.
 #define CUDA_CHECK_KERNEL()                   \
     do {                                      \
         CUDA_CHECK(cudaGetLastError());       \
@@ -43,7 +45,7 @@ int main(int argc, char **argv) {
     long n = atol(argv[1]);
     if (n < 0) n = 0;
 
-    // n = 0：没有元素可算，0 个 block 的 launch 是非法的，特判直接输出。
+    // n = 0: nothing to compute and a 0-block launch is illegal; special-case it.
     if (n == 0) {
         printf("SUM=0\n");
         return 0;
@@ -68,10 +70,10 @@ int main(int argc, char **argv) {
     CUDA_CHECK(cudaMemcpy(d_y, h_y, bytes, cudaMemcpyHostToDevice));
 
     int threads = 256;
-    // 向上取整：n 不是 256 整数倍时也要盖住全部元素。
+    // Round up: cover every element even when n is not a multiple of 256.
     int blocks = (int)((n + threads - 1) / threads);
 
-    // cudaEvent 计时：量的是 GPU 时间线上这段区间的耗时（毫秒）。
+    // cudaEvent timing: elapsed time on the GPU timeline over this interval (ms).
     cudaEvent_t start, stop;
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));

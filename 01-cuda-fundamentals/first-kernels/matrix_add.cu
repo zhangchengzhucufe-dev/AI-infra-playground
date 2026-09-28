@@ -1,22 +1,23 @@
-// 问题 2.6：二维矩阵加法（填空）。
-// 用二维的 block 和 grid 处理 M x N 矩阵，四个空都和二维索引有关。
-// 填完之前这个文件无法通过编译。
+// 2D matrix addition: 16x16 blocks of dim3 and a 2D grid over an M x N matrix,
+// rounded up independently in both dimensions; the row-major flat index is
+// row * N + col. main() judges the result against a CPU reference; expected
+// output PASS.
 #include "common.h"
 
 __global__ void matrixAdd(const float *a, const float *b, float *c, int M, int N) {
-    // ====== 空 1：这个线程负责的行号（用 y 方向的内建变量） ======
+    // Row this thread handles: y-direction built-ins.
     int row = blockIdx.y * blockDim.y + threadIdx.y;
-    // ====== 空 2：这个线程负责的列号（用 x 方向的内建变量） ======
+    // Column this thread handles: x-direction built-ins.
     int col = blockIdx.x * blockDim.x + threadIdx.x;
-    // ====== 空 3：二维边界保护 ======
+    // 2D bounds check: both row and column can overrun the matrix.
     if (row < M && col < N) {
-        int idx = row * N + col;  // 行优先展开成一维下标
+        int idx = row * N + col;  // row-major flattened to a 1D index
         c[idx] = a[idx] + b[idx];
     }
 }
 
 int main() {
-    const int M = 1000, N = 700;  // 都不是 16 的整数倍
+    const int M = 1000, N = 700;  // neither is a multiple of 16
     const long total = (long)M * N;
     size_t bytes = total * sizeof(float);
 
@@ -35,8 +36,8 @@ int main() {
     CUDA_CHECK(cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice));
 
-    dim3 threads(16, 16);  // x 方向 16 列，y 方向 16 行
-    // ====== 空 4：二维 grid——两个方向都要向上取整 ======
+    dim3 threads(16, 16);  // 16 columns along x, 16 rows along y
+    // 2D grid: rounded up independently in both directions.
     dim3 blocks((N + threads.x - 1) / threads.x,
                 (M + threads.y - 1) / threads.y);
     matrixAdd<<<blocks, threads>>>(d_a, d_b, d_c, M, N);

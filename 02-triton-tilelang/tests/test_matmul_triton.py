@@ -1,14 +1,15 @@
 import torch
 
-from kernels.matmul_triton import matmul
+from matmul_ladder.triton import matmul
 
 
 def _device():
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-# 输入用 fp16：GPU 上 fp32 输入的 tl.dot 默认走 TF32（10 位尾数），
-# 数值和 CPU 参考对不上；fp16 输入 + fp32 累加在两种后端行为一致。
+# fp16 inputs: on GPU, tl.dot with fp32 inputs defaults to TF32
+# (10-bit mantissa), which won't match the CPU reference;
+# fp16 inputs + fp32 accumulation behave the same on both backends.
 def _check(M, K, N, seed):
     torch.manual_seed(seed)
     a = torch.randn(M, K, device=_device(), dtype=torch.float16)

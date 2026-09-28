@@ -1,0 +1,30 @@
+[project]
+name = "ai-infra-playground"
+version = "0.1.0"
+description = "Personal GPU infrastructure code collection: CUDA fundamentals, Triton/TileLang kernels, tensor cores, NVFP4"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "triton>=3.0",
+    "pytest>=8.0",
+    "numpy",
+]
+
+[project.optional-dependencies]
+# Only 02-triton-tilelang (TileLang rungs + lowering study) needs this;
+# tested with 0.1.14 (still lowers sm_100a GEMM to mma.sync, see that topic's README)
+tilelang = ["tilelang>=0.1.14"]
+
+[tool.pytest.ini_options]
+pythonpath = ["01-cuda-fundamentals", "02-triton-tilelang", "05-low-precision"]
+testpaths = [
+    "01-cuda-fundamentals/tests",
+    "02-triton-tilelang/tests",
+    "05-low-precision/tests",
+]
+# tilelang 0.1.14 emits deprecation warnings on Python 3.14 (its own API
+# deprecation shim and a typing._eval_type call); they're the library's
+# issue, not ours -- keep the test output readable.
+filterwarnings = [
+    "ignore::DeprecationWarning:tilelang",
+]

@@ -1,35 +1,41 @@
-// 问题 5.3(b):实现 NVFP4 quant kernel。
+// NVFP4 quantization kernel.
 //
-// 输入 bf16 矩阵 [M, K](K 是 16 的倍数),输出:
-//   dataOut:e2m1 打包数据,每行 K/2 byte,低 nibble 放偶数下标元素
-//   sfOut:  e4m3 SF,swizzled 布局(偏移用 nvfp4_common.h 的
-//           sf_swizzled_offset;整个 SF 张量已在调用前清零)
+// Input bf16 matrix [M, K] (K a multiple of 16), outputs:
+//   dataOut: packed e2m1, K/2 bytes per row, the low nibble holds the
+//            even-index element
+//   sfOut:   e4m3 SF in the swizzled layout (offsets via nvfp4_common.h's
+//            sf_swizzled_offset; the whole SF tensor is zeroed before the
+//            call)
 //
-// 每组的计算顺序(判测按同一顺序生成真值,逐 byte 严格相等):
-//   amax = 组内 16 个值的绝对值最大
+// Per-group computation order (the host reference runs the same float
+// math in the same order, so the comparison is byte-exact):
+//   amax = max |v| over the group's 16 values
 //   sf8  = __nv_fp8_e4m3(amax / 6.0f)
 //   sf   = float(sf8)
 //   inv  = sf != 0 ? 1.0f / sf : 0.0f
 //   nibble[i] = encode(v[i] * inv)
 //
-// 设备侧的 e2m1 转换直接用 cuda_fp4.h 的 __nv_fp4x2_e2m1(float2 的 .x
-// 进低 nibble),它在 sm_100 家族上是单条硬件指令;你在 5.3(a) 写的
-// 编码器语义与它一致,host 参考用的就是它。
+// e2m1 conversion goes through e2m1_encode.h's software encoder (host/
+// device, plain C++), so this pipeline runs on any sm_80+ GPU. The
+// production path on sm_100 is the hardware cvt instruction; the encoder
+// was verified against an independent float64 reference over 402,864
+// values including all midpoints, so the packed output is identical.
 //
-// 组织建议:16 元素 = 32 byte,一个线程恰好负责一个组,天然免掉组内
-// 线程协作;quant 没有行间依赖,grid 怎么铺完全自由。
+// Organization: 16 elements = 32 bytes, so one thread owns exactly one
+// group and intra-group cooperation is not needed; quant has no cross-row
+// dependencies, the grid layout is entirely free.
 #pragma once
 #include <cstdint>
 #include <cuda_bf16.h>
-#include <cuda_fp4.h>
 #include <cuda_fp8.h>
+#include "e2m1_encode.h"
 #include "nvfp4_common.h"
 
 template <int BLOCK>
 __global__ void nvfp4_quant_kernel(const __nv_bfloat16* __restrict__ in,
                                    uint8_t* __restrict__ dataOut,
                                    uint8_t* __restrict__ sfOut, int M, int K) {
-    // 一线程一组:全局组编号 -> (行, 行内第几个组)
+    // one thread per group: global group id -> (row, group within row)
     long g = (long)blockIdx.x * BLOCK + threadIdx.x;
     int groupsPerRow = K / NVFP4_GROUP;
     long total = (long)M * groupsPerRow;
@@ -49,18 +55,18 @@ __global__ void nvfp4_quant_kernel(const __nv_bfloat16* __restrict__ in,
     sfOut[sf_swizzled_offset(r, kg, nvfp4_num_ktiles(K))] =
         *(uint8_t*)&sf8;
 
-    // 逐对转 e2m1 并打包:低 nibble 放偶数下标元素
+    // convert and pack pairwise: the low nibble holds the even-index element
     uint8_t* dst = dataOut + ((size_t)r * K / 2 + kg * (NVFP4_GROUP / 2));
 #pragma unroll
     for (int i = 0; i < NVFP4_GROUP; i += 2) {
         float v0 = __bfloat162float(row[i]) * inv;
         float v1 = __bfloat162float(row[i + 1]) * inv;
-        __nv_fp4x2_e2m1 p = __nv_fp4x2_e2m1(make_float2(v0, v1));
-        dst[i / 2] = *reinterpret_cast<uint8_t*>(&p);
+        dst[i / 2] = (uint8_t)(e2m1_encode(v0) | (e2m1_encode(v1) << 4));
     }
 }
 
-// 判测和 5.4 会按这个签名调用;grid 大小你自己定,写在这里。
+// The quantize driver and the fused rms+quant program both call through
+// this signature; the grid size is defined here.
 inline void launch_nvfp4_quant(const __nv_bfloat16* in, uint8_t* dataOut,
                                uint8_t* sfOut, int M, int K, int sms) {
     constexpr int BLOCK = 256;

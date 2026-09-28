@@ -1,6 +1,6 @@
 import torch
 
-from kernels.fused_op import fused, scale
+from kernels.triton_fused_op import fused, scale
 
 
 def _device():
@@ -8,7 +8,7 @@ def _device():
 
 
 def test_scale_still_works():
-    # 原有的 scale 不许改坏。
+    # the existing scale must keep working.
     torch.manual_seed(0)
     x = torch.randn(5000, device=_device())
     torch.testing.assert_close(scale(x), x * 2.0)

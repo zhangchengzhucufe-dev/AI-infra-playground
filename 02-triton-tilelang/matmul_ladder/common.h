@@ -1,11 +1,13 @@
-// Small utilities shared by every exercise here. The final problem (2.9) makes
-// you re-implement the error checks and timing yourself; do not include this
-// file there.
+// Small utilities shared by the CUDA programs here: checked error macros, a
+// cudaEvent timer, seeded data fill, tolerance-based comparison, PASS/FAIL
+// reporting, and a speedup printer. (first-kernels/saxpy.cu is deliberately
+// self-contained and re-declares the error macros and event timing itself.)
 #pragma once
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>
+#include <random>
 
 // Wrap every CUDA API call; on error, report file, line, and cause immediately.
 #define CUDA_CHECK(call)                                                  \
@@ -48,9 +50,11 @@ struct GpuTimer {
 };
 
 // Fixed-seed pseudo-random fill so every run sees identical data.
+// Values land in [0, 10).
 static inline void fill_random(float *p, long n, unsigned seed = 42) {
-    srand(seed);
-    for (long i = 0; i < n; i++) p[i] = (float)(rand() % 1000) / 100.0f;
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> dist(0.0f, 10.0f);
+    for (long i = 0; i < n; i++) p[i] = dist(rng);
 }
 
 // Element-wise compare; fails when relative error exceeds eps, returns 1 on pass.
@@ -77,10 +81,10 @@ static inline int check_close(const float *got, const float *want, long n,
     } while (0)
 
 // ---------------- Performance report ----------------
-// Print the ratio of the two versions. If ratio < warn_below, print an extra
-// hint without touching the exit code -- the judge only lays out the numbers;
-// judging fast vs slow is left to you and the handout explanation.
-// warn_below <= 0 means the problem expects no speedup; no hint is printed.
+// Print the speedup ratio of two versions. If ratio < warn_below, print an
+// extra hint without touching the exit code -- the program only lays out the
+// numbers; interpreting fast vs slow is up to the reader.
+// warn_below <= 0 means no speedup is expected; no hint is printed.
 static inline float report_speedup(const char *label, float base_ms,
                                    float opt_ms, float warn_below,
                                    const char *hint) {
@@ -93,8 +97,8 @@ static inline float report_speedup(const char *label, float base_ms,
 }
 
 // ---------------- Machine-readable result line ----------------
-// For external grading frameworks. Off by default; set WMHPC_RESULT=1 to
-// emit it so everyday output stays clean.
+// One ##RESULT JSON line for external harnesses to parse. Opt-in via
+// WMHPC_RESULT=1; off by default so everyday output stays clean.
 // Convention: the exit code expresses correctness only; timing never affects it.
 static inline void emit_result(const char *prob, const char *status,
                                const char *metrics_json) {

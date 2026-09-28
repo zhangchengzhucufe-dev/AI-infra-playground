@@ -1,0 +1,20 @@
+# CUDA build output (rebuild with: cd cuda && make bin/...)
+bin/
+*.o
+*.ptx
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# profiler captures
+*.ncu-rep
+*.nsys-rep
+.zcode/
+
+# profiler captures
+*.ncu-rep
+*.nsys-rep
+*.ptx

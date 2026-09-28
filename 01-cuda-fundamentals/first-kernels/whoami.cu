@@ -1,11 +1,13 @@
-// 问题 2.8：观察执行顺序。
-// 连续运行两三次，对比 block 出现的先后顺序，回答 handout 里的问题。
+// Block scheduling order, observed: 16 blocks each check in with printf from
+// thread 0. Run it a few times in a row -- the order the blocks appear in
+// changes between runs, because the order in which blocks execute is simply
+// not specified; the scheduler fills SMs however resources allow.
 #include "common.h"
 
 __global__ void whoami() {
-    // 让每个 block 的 0 号线程报到。
+    // Thread 0 of each block checks in.
     if (threadIdx.x == 0) {
-        printf("block %d 报到\n", blockIdx.x);
+        printf("block %d checks in\n", blockIdx.x);
     }
 }
 

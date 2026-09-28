@@ -1,6 +1,9 @@
-// 问题 2.5：找 bug。
-// 这个程序不报错，直接 FAIL（kernel 好像压根没跑。。。）
-// 任务：先定位到具体error（提示在文件末尾），再解释原因，并修好它。
+// A launch-configuration bug and its fix, kept for reference: with
+// threads = 2048 the launch exceeded maxThreadsPerBlock (1024 on this GPU),
+// the launch was invalid, the kernel never ran, and the result check failed --
+// with no error message, because nothing ever queried the launch error.
+// threads = 1024 plus the CUDA_CHECK_KERNEL() macro after the launch is the
+// corrected version.
 #include "common.h"
 
 __global__ void vectorAdd(const float *a, const float *b, float *c, int n) {
@@ -28,18 +31,21 @@ int main() {
     CUDA_CHECK(cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemset(d_c, 0, bytes));
 
-    int threads = 1024;  // bug 修复：2048 超过了每 block 最大线程数（这块卡是 1024），
-                         // launch 直接无效，kernel 根本没跑；加上错误检查就能看到
-                         // cudaErrorInvalidConfiguration。
+    int threads = 1024;  // fix: 2048 exceeds the max threads per block (1024 on
+                         // this GPU), so the launch was invalid and the kernel
+                         // never ran; add the error checks and you'll see
+                         // cudaErrorInvalidConfiguration.
     int blocks = (n + threads - 1) / threads;
     vectorAdd<<<blocks, threads>>>(d_a, d_b, d_c, n);
-    CUDA_CHECK_KERNEL();  // kernel launch 没有返回值，要用它把启动错误抓出来
+    CUDA_CHECK_KERNEL();  // kernel launch has no return value; this catches launch errors
 
     CUDA_CHECK(cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost));
     REPORT(check_close(h_c, h_ref, n));
     return 0;
 }
 
-// 提示：kernel 启动语句后面补一行 CUDA_CHECK_KERNEL() 再跑一次，
-// 报错信息会告诉你该往哪个方向查。查完记得回答：为什么不加这一行时
-// 程序一声不吭？（问题 0.2 打印过的哪个上限和这里有关？）
+// Why the failure is silent without CUDA_CHECK_KERNEL(): a kernel launch
+// returns no error code, and launch errors stay queued until the next CUDA
+// call queries them -- here nothing between the bad launch and the result
+// check would ever surface cudaErrorInvalidConfiguration. The related limit
+// is maxThreadsPerBlock, one of the fields device_query prints.

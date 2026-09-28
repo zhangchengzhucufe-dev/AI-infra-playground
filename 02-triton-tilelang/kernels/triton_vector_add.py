@@ -1,8 +1,8 @@
-"""问题 7.1：Triton 向量加法（填空）。
+"""Triton vector addition -- the four load-bearing lines of any Triton kernel:
+program id, the global index block it covers, the bounds mask, the masked store.
 
-四个空对应 Triton kernel 的四个 basic operation。填完运行：
     pytest tests/test_vector_add.py
-没有 GPU 也能跑，conftest.py 会自动切到 interpreter 模式。
+Runs without a GPU too -- conftest.py switches to interpreter mode automatically.
 """
 
 import torch
@@ -12,21 +12,25 @@ import triton.language as tl
 
 @triton.jit
 def add_kernel(x_ptr, y_ptr, z_ptr, n, BLOCK_SIZE: tl.constexpr):
-    # ====== 空 1：当前 program 在一维 grid 里的编号 ======
+    # index of this program in the 1-D grid
     pid = tl.program_id(0)
-    # ====== 空 2：这个 program 负责的一段全局下标（长度 BLOCK_SIZE） ======
+    # the block of global indices this program covers (BLOCK_SIZE long)
     offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    # ====== 空 3：屏蔽越界位置的 mask ======
+    # mask that screens out out-of-bounds positions
     mask = offsets < n
 
     x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
     y = tl.load(y_ptr + offsets, mask=mask, other=0.0)
 
-    # ====== 空 4：把 x + y 写回 z（别忘了 mask） ======
+    # write x + y back to z, respecting the mask
     tl.store(z_ptr + offsets, x + y, mask=mask)
 
 
 def add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    # the kernel addresses memory flat, so it needs one contiguous layout;
+    # a transposed/strided view would silently compute on wrong addresses
+    x = x.contiguous()
+    y = y.contiguous()
     z = torch.empty_like(x)
     n = x.numel()
     BLOCK_SIZE = 1024

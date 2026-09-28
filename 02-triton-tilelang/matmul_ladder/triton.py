@@ -1,9 +1,9 @@
-"""Bonus（选做）：Triton tiled matmul。
+"""Bonus: Triton tiled matmul.
 
-任务：调 bench() 的 BLOCK_M / BLOCK_N / BLOCK_K，记录实测数据。
-    哪组参数最快？差多少？为什么 tile 大小会影响这么大
+Task: sweep BLOCK_M / BLOCK_N / BLOCK_K in bench() and record the numbers.
+    Which config wins, by how much, and why does tile size matter this much?
 
-    python -c "from kernels.matmul_triton import bench; bench()"
+    python -c "from matmul_ladder.triton import bench; bench()"
 """
 
 import torch
@@ -63,7 +63,7 @@ def matmul(a: torch.Tensor, b: torch.Tensor,
 
 
 def bench(M=2048, N=2048, K=2048):
-    assert torch.cuda.is_available(), "benchmark 需要 GPU"
+    assert torch.cuda.is_available(), "benchmark requires a GPU"
     a = torch.randn((M, K), device="cuda", dtype=torch.float16)
     b = torch.randn((K, N), device="cuda", dtype=torch.float16)
     configs = [(32, 32, 32), (64, 64, 32), (128, 64, 32), (128, 128, 32),

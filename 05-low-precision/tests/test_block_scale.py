@@ -1,8 +1,9 @@
-"""问题 5.2 的判测，不需要修改。"""
+"""Unit tests for the block-scale placement simulation in
+experiments/block_scale_sim.py (fp64)."""
 
 import torch
 
-from kernels.block_scale_sim import (
+from experiments.block_scale_sim import (
     SEG,
     gemm_fp64,
     gemm_scale_along_k,
@@ -33,7 +34,8 @@ def test_along_k_restores_each_partial_sum():
     A, B, sA, sB, _, _ = _data()
     ref = gemm_fp64(A, B)
     got = gemm_scale_along_k(A, B, sA, sB)
-    # 分段会改变 fp64 加法的分组，所以测代数等价而不测 bit-exact。
+    # segmenting changes fp64 summation grouping, so check algebraic
+    # equivalence, not bit-exactness
     torch.testing.assert_close(got, ref, rtol=2e-13, atol=2e-13)
 
 

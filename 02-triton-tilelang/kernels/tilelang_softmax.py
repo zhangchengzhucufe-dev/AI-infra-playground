@@ -1,22 +1,22 @@
-"""问题 7.7（压轴）：softmax in TileLang（FROM-SCRATCH）。
+"""Row softmax in TileLang, written from scratch.
 
-contract：
-- softmax(x) 接收形状 (M, N) 的 float32 CUDA tensor，返回同形状结果，
-  对每一行独立做 softmax；
-- kernel 用 TileLang 自己写，一个 block 处理一行（或一小批行）；
-- 为了确保数值稳定，要求行内先减最大值，再做 exp 与求和。测试里有一行
-  数值巨大的输入，不稳定的实现会得到 inf/nan；
-- 行宽 N 任意，可以假设 N <= 4096。TileLang 的 kernel 按形状编译，
-  用 make_xxx(M, N) 针对形状生成、在 wrapper 里按形状缓存编译结果
-  是常见做法（结构可以参考 7.3、7.4）；
-- 归约用 T.reduce_max / T.reduce_sum，逐元素部分用 T.Parallel 加 T.exp；
-- fragment 的宽度建议取不小于 N 的 2 的幂（类比 Triton 的
-  next_power_of_2），不足的位置补 -inf（T.if_then_else 加 T.infinity），
-  否则布局推断可能报 no available layout；
-- 通过 pytest tests/test_tilelang_softmax.py 即为完成。
+Design:
+- softmax(x) takes a float32 CUDA tensor of shape (M, N) and returns the
+  same-shape result, softmaxed independently per row; one block per row.
+- Numerically safe: subtract the row max before exp (the tests include rows
+  with huge values; an unstable implementation produces inf/nan).
+- Row width N is arbitrary (assumed <= 4096). TileLang compiles per shape,
+  so make_softmax(M, N) generates the kernel and the wrapper caches it by
+  shape -- the standard TileLang pattern.
+- Fragment width is the next power of 2 >= N, tail padded with -inf
+  (T.if_then_else + T.infinity); otherwise layout inference can fail with
+  "no available layout".
+- Reductions are explicit here: T.reduce_max / T.reduce_sum.
 
-(Optional) 将你的实现和 torch.softmax 比较一下性能（行宽取 256/1024/4096），
-Tip: elementwise + 行内归约的 kernel 大概率是带宽瓶颈，可以想想理论上限是多少。
+    pytest tests/test_tilelang_softmax.py
+
+Benchmarked against torch.softmax in this topic's README: bandwidth-bound,
+at parity (183-291 GB/s depending on N).
 """
 
 import torch
@@ -31,7 +31,7 @@ def _next_pow2(n: int) -> int:
 
 
 def make_softmax(M, N, dtype="float32", threads=128):
-    # fragment 宽度取不小于 N 的 2 的幂；不足的位置补 -inf。
+    # fragment width = next pow2 >= N; pad the tail with -inf.
     BLOCK_N = _next_pow2(max(N, 1))
 
     @T.prim_func
@@ -44,19 +44,20 @@ def make_softmax(M, N, dtype="float32", threads=128):
             row_max = T.alloc_fragment((1,), dtype)
             row_sum = T.alloc_fragment((1,), dtype)
 
-            # 装载：j >= N 的位置补 -inf（读 global 时把下标夹在 N-1，
-            # 避免越界，值反正会被 -inf 盖掉）。
+            # load: pad j >= N with -inf (clamp the global index at N-1 to
+            # stay in bounds; the value is overridden by -inf anyway).
             for j in T.Parallel(BLOCK_N):
                 row[j] = T.if_then_else(
                     j < N, X[m, T.min(j, N - 1)], -T.infinity(dtype))
 
-            # 数值稳定的关键：先减掉行内最大值，exp 的参数最大是 0，不会溢出。
+            # numerical stability: subtract the row max first, so exp's
+            # argument is at most 0 and cannot overflow.
             T.reduce_max(row, row_max, dim=0, clear=True)
             for j in T.Parallel(BLOCK_N):
                 row[j] = T.exp(row[j] - row_max[0])
             T.reduce_sum(row, row_sum, dim=0, clear=True)
 
-            # 写回：只写前 N 个位置。
+            # store: only the first N positions.
             for j in T.Parallel(N):
                 Y[m, j] = row[j] / row_sum[0]
 
@@ -65,9 +66,9 @@ def make_softmax(M, N, dtype="float32", threads=128):
 
 def softmax(x: torch.Tensor) -> torch.Tensor:
     M, N = x.shape
-    key = (M, N)
+    key = (M, N, x.dtype)
     if key not in _kernel_cache:
-        _kernel_cache[key] = tilelang.compile(make_softmax(M, N))
+        _kernel_cache[key] = tilelang.compile(make_softmax(M, N, dtype=str(x.dtype).removeprefix('torch.')))
     y = torch.empty_like(x)
     _kernel_cache[key](x, y)
     return y

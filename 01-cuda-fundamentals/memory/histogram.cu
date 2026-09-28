@@ -1,6 +1,7 @@
-// 问题 4.5：直方图（填空）。
-// 统计 16M 个字节的值落在 256 个 bucket 里的次数。
-// 注意：多个线程可能同时修改同一个 bucket 的值。
+// Histogram of 16M bytes into 256 bins, grid-stride loop over the data. Many
+// threads can hit the same bin simultaneously, so the increment must be
+// atomic. main() checks all 256 bins against a CPU reference and prints the
+// average time and effective throughput; expected output PASS.
 #include "common.h"
 
 __global__ void histogram(const unsigned char *data, unsigned int *hist, int n) {
@@ -8,8 +9,8 @@ __global__ void histogram(const unsigned char *data, unsigned int *hist, int n) 
     int stride = blockDim.x * gridDim.x;
     for (; i < n; i += stride) {
         unsigned char v = data[i];
-        // ====== 空 1：往 hist[v] 里加 1
-        //         该用哪个原子操作？ ======
+        // Contention: other threads may update hist[v] at the same instant,
+        // so a plain ++ would lose updates. atomicAdd makes it safe.
         atomicAdd(&hist[v], 1u);
     }
 }
@@ -20,8 +21,9 @@ int main() {
 
     unsigned char *h_data = (unsigned char *)malloc(n);
     unsigned int h_hist[BINS], h_ref[BINS] = {0};
-    srand(9);
-    for (int i = 0; i < n; i++) h_data[i] = (unsigned char)(rand() % BINS);
+    std::mt19937 rng(9);
+    std::uniform_int_distribution<int> byte(0, BINS - 1);
+    for (int i = 0; i < n; i++) h_data[i] = (unsigned char)byte(rng);
     for (int i = 0; i < n; i++) h_ref[h_data[i]]++;
 
     unsigned char *d_data;
@@ -45,7 +47,7 @@ int main() {
             break;
         }
 
-    // 计时，供问题 4.6 改造后对比。
+    // Timed loop: baseline numbers for comparison with the privatized version.
     const int reps = 50;
     GpuTimer timer;
     timer.start();
@@ -53,7 +55,7 @@ int main() {
         histogram<<<blocks, threads>>>(d_data, d_hist, n);
     float ms = timer.stop_ms() / reps;
     CUDA_CHECK_KERNEL();
-    printf("平均耗时 %.4f ms  (%.2f GB/s)\n", ms, n / ms / 1e6);
+    printf("avg time %.4f ms  (%.2f GB/s)\n", ms, n / ms / 1e6);
     REPORT(ok);
     return 0;
 }

@@ -1,5 +1,6 @@
-// Shared helpers for every program in this directory: error checks, event
-// timing, plus bf16 and bandwidth helpers.
+// Shared utilities for the programs in this directory: error checks, a
+// CUDA-event timer, and effective-bandwidth math. Same lineage as the
+// common.h in the other topic directories, plus the bf16 header.
 #pragma once
 #include <cmath>
 #include <cstdio>
@@ -7,6 +8,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
+// Wrap every CUDA API call; on error, report file, line, and cause immediately.
 #define CUDA_CHECK(call)                                                  \
     do {                                                                  \
         cudaError_t err_ = (call);                                        \
@@ -18,12 +20,14 @@
         }                                                                 \
     } while (0)
 
+// Kernel launches return no error code; catch launch errors with these.
 #define CUDA_CHECK_KERNEL()                        \
     do {                                           \
         CUDA_CHECK(cudaGetLastError());            \
         CUDA_CHECK(cudaDeviceSynchronize());       \
     } while (0)
 
+// cudaEvent-based timer; measures elapsed time on the GPU timeline (ms).
 struct GpuTimer {
     cudaEvent_t start_, stop_;
     GpuTimer() {
@@ -44,7 +48,8 @@ struct GpuTimer {
     }
 };
 
-// Average of iters launches after warmup, in ms. Use for bandwidth and TFLOPS alike.
+// Average of iters launches after warmup, in ms. Used for bandwidth and
+// TFLOPS numbers alike.
 template <typename F>
 static inline float time_avg_ms(F&& launch, int iters, int warmup = 20) {
     for (int i = 0; i < warmup; i++) launch();
@@ -56,18 +61,15 @@ static inline float time_avg_ms(F&& launch, int iters, int warmup = 20) {
     return ms / iters;
 }
 
-// Effective bandwidth: bytes is traffic that must cross HBM (reads + writes);
-// count it before passing it in.
+// Effective bandwidth: bytes is the traffic that must cross HBM
+// (reads + writes); work it out per kernel before passing it in.
 static inline double effective_gbps(double bytes, float ms) {
     return bytes / (ms * 1e6);
 }
 
-// fp16/bf16 GEMM usually is not bit-exact against a CPU reference
-// (tensor core accumulation order differs); loosen rtol with the magnitude
-// of K (rule of thumb: ~1e-2 at K=4096, plus another 2^-8 of output rounding
-// for bf16 outputs). Integer-built cases can match exactly; each file header
-// states which check it uses.
-static inline int check_close(const float *got, const float *want, long n,
+// Element-wise compare against a reference; tolerances come from the
+// caller, which knows the accumulation-order and output-rounding story.
+static inline int check_close(const float* got, const float* want, long n,
                               float rtol) {
     long bad = 0;
     for (long i = 0; i < n; i++) {

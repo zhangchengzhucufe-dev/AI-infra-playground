@@ -1,25 +1,26 @@
-// 问题 0.1:最小的 tensor core 程序,不需要修改。
+// The smallest possible tensor core program: one warp issues a single
+// mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32, i.e.
+// D[16x8] = A[16x16] x B[16x8] + C. A/B hold small integers (exact in fp16,
+// and the f32 accumulate stays exact), so the host check against a plain
+// CPU loop is strict equality.
 //
-// 单个 warp 发一条 mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32:
-// D[16x8] = A[16x16] × B[16x8] + C。A/B 用小整数填充(fp16 下精确,
-// f32 累加也精确),host 端用 CPU 循环对拍,所以判测是严格相等。
+// The fragment loads are written out as the index formulas from the PTX
+// docs. fragment_map.cu re-derives the same scheme for the m16n8k32 fp8
+// shape; make ptx/fragments/first_mma shows the generated PTX for this
+// one.
 //
-// fragment 的装载按 PTX 文档的公式写成了下标计算的形式,课件 P2.2
-// 推导的就是这组公式;模块 1 会让你对另一个形状把它们重新推一遍。
-//
-// 运行:make run/m0_env/01_first_mma
-// 题面 (b) 问会用到 Makefile 的 ptx 目标和 assignment01 的
-// sassonly/ptxonly 实验,见题面。
+// Run: make run/fragments/first_mma
 #include <cuda_fp16.h>
 #include "../common.h"
 
 __global__ void mma_demo(const __half* A, const __half* B, float* D) {
     int lane = threadIdx.x;
-    int group = lane >> 2;      // 行方向的 8 个组
-    int tig = lane & 3;         // 组内 4 个线程
+    int group = lane >> 2;      // one of the 8 row groups
+    int tig = lane & 3;         // thread within the group
 
-    // A fragment:每线程 8 个 fp16,4 个 b32 寄存器。
-    // 寄存器 r 的两个元素:(row, col) 见下标;k 的后半在 r=2,3。
+    // A fragment: 8 fp16 per thread in 4 b32 registers.
+    // Register r's two elements: (row, col) per the indices; second k half
+    // in r=2,3.
     unsigned a[4];
     __half2* ah = reinterpret_cast<__half2*>(a);
     ah[0] = __halves2half2(A[(group)*16 + tig * 2], A[(group)*16 + tig * 2 + 1]);
@@ -30,7 +31,7 @@ __global__ void mma_demo(const __half* A, const __half* B, float* D) {
     ah[3] = __halves2half2(A[(group + 8) * 16 + tig * 2 + 8],
                            A[(group + 8) * 16 + tig * 2 + 9]);
 
-    // B fragment(col 布局,B 在内存里按 [k][n] 行主序存):
+    // B fragment (col layout; B is stored [k][n] row-major in memory):
     unsigned b[2];
     __half2* bh = reinterpret_cast<__half2*>(b);
     bh[0] = __halves2half2(B[(tig * 2) * 8 + group], B[(tig * 2 + 1) * 8 + group]);
@@ -45,7 +46,7 @@ __global__ void mma_demo(const __half* A, const __half* B, float* D) {
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
           "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
 
-    // D fragment:d0,d1 在 row=group,d2,d3 在 row=group+8。
+    // D fragment: d0,d1 at row=group, d2,d3 at row=group+8.
     D[(group)*8 + tig * 2] = d[0];
     D[(group)*8 + tig * 2 + 1] = d[1];
     D[(group + 8) * 8 + tig * 2] = d[2];

@@ -1,5 +1,6 @@
-// Shared helpers for every program in this directory: error checks, event
-// timing, plus bf16 and bandwidth helpers.
+// Shared helpers for every program in this directory: CUDA error checks,
+// event timing, and the averaged-launch benchmark helper all the
+// TFLOPS/bandwidth numbers come from.
 #pragma once
 #include <cmath>
 #include <cstdio>
@@ -56,17 +57,18 @@ static inline float time_avg_ms(F&& launch, int iters, int warmup = 20) {
     return ms / iters;
 }
 
-// Effective bandwidth: bytes is traffic that must cross HBM (reads + writes);
-// count it before passing it in.
+// Effective bandwidth: bytes is traffic that must cross HBM (reads + writes).
 static inline double effective_gbps(double bytes, float ms) {
     return bytes / (ms * 1e6);
 }
 
-// fp16/bf16 GEMM usually is not bit-exact against a CPU reference
-// (tensor core accumulation order differs); loosen rtol with the magnitude
-// of K (rule of thumb: ~1e-2 at K=4096, plus another 2^-8 of output rounding
-// for bf16 outputs). Integer-built cases can match exactly; each file header
-// states which check it uses.
+// Tolerance for half-precision checks: tensor core accumulation order
+// differs from the CPU loop, so GEMM with fp16/bf16 inputs and fp32
+// accumulate usually is not bit-exact against a CPU reference; loosen rtol
+// with the magnitude of K (rule of thumb: ~1e-2 at K=4096, plus another
+// 2^-8 of output rounding for bf16 outputs). Cases built from pure or small
+// integers can match exactly; each program's header states which check it
+// uses.
 static inline int check_close(const float *got, const float *want, long n,
                               float rtol) {
     long bad = 0;
