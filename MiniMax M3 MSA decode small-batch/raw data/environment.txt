@@ -1,5 +1,0 @@
-captured_at=2026-09-10T17:56:31+00:00
-host=b300-login
-git_commit=617aa6870d5482c284d25282adc8c2ab3476d263
-
-=== nvidia-smi ===
